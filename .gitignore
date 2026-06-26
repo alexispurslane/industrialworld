@@ -1,0 +1,4 @@
+build/
+*.o
+lua_modules/
+.luarocks/
