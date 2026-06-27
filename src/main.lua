@@ -1,9 +1,10 @@
 --- Main entry point for the industrialworld demo.
 ---
---- Opens a libtcod context with the vendored terminal.png font as a
---- tileset, renders a border + label, and runs a blocking event loop
---- until Escape is pressed. Exercises the full vendored-LuaJIT + libtcod
---- + FFI wrapper stack end to end.
+--- Opens a BearLibTerminal window configured with TWO TrueType tilesets
+--- at disjoint Unicode ranges: DejaVuSansMono at offset 0 (ASCII/box-drawing
+--- tiles, antialiased) and DejaVuSerif at 0xE000+ (Private Use Area) for
+--- the messages panel text. BLT's global codespace resolves per-cell by
+--- codepoint, so both fonts coexist on screen simultaneously.
 ---
 --- Also sets up entity storage (a pooled, pre-allocated entity table +
 --- dense cffi alive-tombstone, see below) and a Map.
@@ -22,7 +23,7 @@ _G.enum = require("enums")
 -- every require return the same bus object, so all subscribers and all
 -- emitters share one registry.
 local ffi = require("ffi")
-local tcod = require("industrialworld.tcod")
+local blt = require("industrialworld.blt")
 local Entity = require("entity")
 local world = require("world")
 local bus = require("event")
@@ -42,33 +43,36 @@ end
 local function main()
     local cols, rows = 80, 50
 
-    -- Load the vendored DejaVu 16×16 square tileset. It is a 32×8 TCOD-layout
-    -- sheet, so we pass tcod.charmap_tcod to map ASCII codepoints to the right tiles.
-    local tileset, terr = tcod.Tileset.load_font("terminal.png", 32, 8, tcod.charmap_tcod)
-    if not tileset then
-        log.get("main"):error("failed to load tileset: %s", terr or "unknown")
+    -- Open the BLT window + configure fonts. The config string is a
+    -- semicolon-separated list of option groups. Two tilesets:
+    --   • DejaVuSansMono at offset 0        → AA monospace tiles (ASCII,
+    --     box-drawing, block elements). use-box-drawing/block-elements
+    --     tell BLT to use the font's own glyphs for those ranges.
+    --   • DejaVuSerif   at offset 0xE000     → serif glyphs for the
+    --     messages panel (drawn via PUA codepoints, see messages.lua).
+    -- Both share one global codespace; a cell's codepoint resolves to
+    -- whichever tileset owns that range. cellsize is fixed square so
+    -- tile centering math is unchanged from the libtcod model.
+    if not blt.open() then
+        log.get("main"):error("failed to open BearLibTerminal")
+        return 1
+    end
+    local cfg = table.concat({
+        "window.title='industrialworld'",
+        "window.size=" .. cols .. "x" .. rows,
+        "window.cellsize=16x16",
+        "font: vendor/fonts/DejaVuSansMono.ttf, size=16x16, use-box-drawing=false, use-block-elements=false, hinting=normal",
+        "0xE000: vendor/fonts/DejaVuSans.ttf, size=16x16, align=center, hinting=normal",
+    }, "; ")
+    if not blt.set(cfg) then
+        log.get("main"):error("failed to configure BearLibTerminal fonts")
+        blt.close()
         return 1
     end
 
-    local ctx, err = tcod.Context.new({
-        columns = cols,
-        rows = rows,
-        window_title = "industrialworld",
-        vsync = true,
-        renderer = tcod.renderer_sdl2,
-        tileset = tileset,
-    })
-    if not ctx then
-        log.get("main"):error("failed to create context: %s", err or "unknown")
-        return 1
-    end
-
-    local con = tcod.Console.new(cols, rows)
-    if not con then
-        log.get("main"):error("failed to create console")
-        ctx:shutdown()
-        return 1
-    end
+    -- Console shim: records logical size for centering/cull math; draws
+    -- route into BLT's global scene on layer 0. refresh() flips it.
+    local con = blt.Console.new(cols, rows)
 
     log.get("main"):info("industrialworld ready (%dx%d) log=%s", cols, rows, env_lvl or "info")
 
@@ -174,17 +178,17 @@ local function main()
     -- Message log panel (drawn last so it overwrites any stray glyphs in
     -- its reserved bottom rows).
     messages.draw(con)
-    ctx:present(con)
+    con:refresh()
 
-    -- Keybinds (raw vk -> semantic emit). The real-time loop below drains
-    -- pending keypresses each frame and emits BOTH a general
+    -- Keybinds (raw TK_* code -> semantic emit). The real-time loop below
+    -- drains pending keypresses each frame and emits BOTH a general
     -- `keypress:<vk>` event (for any mixin/system that wants raw keys) AND
     -- the bound semantic action (move/peek/quit). Mixins listen for the
     -- semantics they care about; the general keypress channel is the escape
     -- hatch for ad-hoc key reactions. Explicit per-key emits (few, fixed
     -- binds) instead of a packed table — avoids unpack and keeps arg types
     -- visible to the linter.
-    local key = tcod.key
+    local key = blt -- TK_* codes live directly on the blt module (blt.tk_up etc.)
     local quit = false
     bus.subscribe(world, "quit", function()
         L:debug("quit requested")
@@ -201,8 +205,8 @@ local function main()
     end)
 
     -- Real-time frame pump. Each iteration:
-    --   1. Drain ALL pending input events (nonblocking; check_for_event
-    --      returns 0 when the queue is empty). Keybinds emit semantic
+    --   1. Drain ALL pending input events (nonblocking; blt.has_input()
+    --      returns false when the queue is empty). Keybinds emit semantic
     --      actions (move/peek/quit) into the bus — input stays event-
     --      driven, but the sim no longer BLOCKS on input.
     --   2. Compute dt via os.clock() (seconds since last frame).
@@ -211,37 +215,37 @@ local function main()
     --      frame whether the entity moved discretely or via velocity.
     --   4. Render + present.
     --   5. Sleep to cap the framerate (~60 FPS) so we don't spin the CPU.
-    -- The old blocking wait_for_event is gone; the sim now advances in real
-    -- time independent of keypresses, which is what unblocks NPCs, DoTs,
-    -- animations, etc. Keybinds still emit BOTH the semantic action AND the
-    -- raw keypress:<vk> channel, as before.
+    --   The old blocking wait_for_event is gone; the sim now advances in real
+    --   time independent of keypresses, which is what unblocks NPCs, DoTs,
+    --   animations, etc. Keybinds still emit BOTH the semantic action AND the
+    --   raw keypress:<vk> channel, as before.
     local last = os.clock()
     local FRAME_TIME = 1 / 60 -- target 60 FPS
     while not quit do
-        -- 1. Drain pending input (nonblocking).
-        while true do
-            local ev, kev = tcod.check_for_event(tcod.event_key_press)
-            if ev == 0 then
+        -- 1. Drain pending input (nonblocking). BLT's read() dequeues one
+        --    event code per call; has_input() is the nonblocking drain guard.
+        while blt.has_input() do
+            local vk = blt.read()
+            if vk == 0 or vk < 0 then
                 break
             end
-            local vk = tonumber(kev.vk)
             L:debug("key vk=%d", vk)
             -- General raw-key channel: keypress:<vk>.
             bus.emit(("keypress:%d"):format(vk))
             -- Semantic channel: the bound action, if any.
-            if vk == key.right then
+            if vk == key.tk_right then
                 bus.emit("move", 1, 0)
-            elseif vk == key.left then
+            elseif vk == key.tk_left then
                 bus.emit("move", -1, 0)
-            elseif vk == key.up then
+            elseif vk == key.tk_up then
                 bus.emit("move", 0, -1)
-            elseif vk == key.down then
+            elseif vk == key.tk_down then
                 bus.emit("move", 0, 1)
-            elseif vk == key.pageup then
+            elseif vk == key.tk_pageup then
                 world.peek(1)
-            elseif vk == key.pagedown then
+            elseif vk == key.tk_pagedown then
                 world.peek(-1)
-            elseif vk == key.escape then
+            elseif vk == key.tk_escape then
                 bus.emit("quit")
             end
         end
@@ -259,29 +263,34 @@ local function main()
         world.render_map(con, view_rows)
         world.draw_entities(con)
         messages.draw(con)
-        ctx:present(con)
+        con:refresh()
 
-        -- 5. Cap framerate. vsync (set on context creation) already
-        --    synchronizes ctx:present() to the display refresh (~60Hz),
-        --    so this is belt-and-suspenders. Try luasocket's sleep if
-        --    available in the host; if not (embedded host may not ship
-        --    it), rely on vsync alone and skip — no crash. Resolved once.
+        -- 5. Cap framerate. BLT doesn't expose vsync control, so we sleep
+        --    the remainder of the frame budget. Try luasocket's sleep if
+        --    available in the host; if not (embedded host may not ship it),
+        --    use BLT's own terminal_delay (portable, ms). Resolved once.
         local elapsed = os.clock() - now
         local remaining = FRAME_TIME - elapsed
-        if remaining > 0 and _G._sleep_fn ~= nil then
-            _G._sleep_fn(remaining)
-        elseif remaining > 0 and _G._sleep_tried == nil then
+        if remaining > 0 then
+            if _G._sleep_fn ~= nil then
+                _G._sleep_fn(remaining)
+            else
+                -- Fallback: BLT's portable delay (ms). Coarser than socket.sleep
+                -- but always available — avoids a spin. Resolved once below.
+                blt.delay(math.floor(remaining * 1000))
+            end
+        end
+        if _G._sleep_tried == nil then
             _G._sleep_tried = true
             local ok, sock = pcall(require, "socket")
             if ok and type(sock.sleep) == "function" then
                 _G._sleep_fn = sock.sleep
-                sock.sleep(remaining)
             end
         end
     end
 
     con:shutdown()
-    ctx:shutdown()
+    blt.close()
     return 0
 end
 

@@ -349,7 +349,7 @@ end
 --- set by the caller (main.lua reserves PANEL_H rows at the bottom),
 --- else the full console height. The camera centers in this region so
 --- the player sits mid-screen of the VISIBLE area, not the full console.
----@param con table  tcod.Console
+---@param con table  iw.Console (blt shim)
 ---@param view_rows? integer  usable map rows (default cam.view_rows or con:height()).
 function world.render_map(con, view_rows)
     local cam = world.cam
@@ -447,7 +447,7 @@ end
 --- Entities below the camera (z < cam.z) are not drawn. Scans the pooled
 --- slots [1..capacity], skipping dead ones via the `world.alive` tombstone.
 --- Entities without a `draw` method are skipped.
----@param con table  tcod.Console
+---@param con table  iw.Console (blt shim)
 function world.draw_entities(con)
     local cam = world.cam
     local cz = cam.z

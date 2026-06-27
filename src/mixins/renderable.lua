@@ -19,6 +19,8 @@
 --- A glyph's `ch` may be a string (first codepoint) or an integer
 --- codepoint. Per-glyph `fg`/`bg` override the mixin defaults.
 
+local blt = require("industrialworld.blt")
+
 local Renderable = {}
 
 --- Decode a UTF-8 string into a list of integer codepoints.
@@ -115,6 +117,12 @@ end
 --- nearest cell. Each glyph's per-cell fg/bg (if set) overrides the
 --- mixin defaults; nil falls back to `console` defaults via put_char.
 --- Position is a PARAMETER (pure leaf — does not read self.x/self.y).
+---
+--- Draws on the ENTITY layer (BLT layer 1, fg-only/transparent) so the
+--- tile bg painted by render_map on layer 0 shows through — no need for
+--- entity-side tile-bg lookup. A glyph that explicitly sets a bg paints
+--- it only if layer 0 has nothing there (composition is off, so a layer-1
+--- put replaces the cell's layer-1 fg, not the layer-0 bg).
 ---@param console iw.Console
 ---@param x number  World x (cells).
 ---@param y number  World y (cells).
@@ -122,7 +130,18 @@ function Renderable:draw(console, x, y)
     local x0 = math.floor(x + 0.5)
     local y0 = math.floor(y + 0.5)
     for _, g in ipairs(self.glyphs) do
-        console:put_char(x0 + g.dx, y0 + g.dy, g.ch, g.fg or self.fg, g.bg or self.bg)
+        -- Layer 1 (entity): fg over whatever tile bg layer 0 drew. An
+        -- explicit g.bg still wins for this cell's layer-1 background
+        -- (BLT only honors bg on layer 0, so g.bg here is effectively
+        -- ignored — entities are pure fg over the map).
+        console:put_char(
+            x0 + g.dx,
+            y0 + g.dy,
+            g.ch,
+            g.fg or self.fg,
+            g.bg or self.bg,
+            blt.LAYER_ENTITY
+        )
     end
 end
 

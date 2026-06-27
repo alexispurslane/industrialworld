@@ -2,33 +2,53 @@
 
 ## Architecture
 
-A single-process LuaJIT host that statically links libtcod. The C side
-(`src/main.c`) is intentionally thin: it preloads every compiled Lua
-module into `package.preload` and then runs the `main` module. libtcod
-owns the window and its own event loop, so the host needs no event-pump
-plumbing of its own.
+A single-process LuaJIT host that statically links BearLibTerminal
+(BLT). The C side (`src/main.c`) is intentionally thin: it preloads every
+compiled Lua module into `package.preload` and then runs the `main`
+module. BLT owns the window; the Lua side's real-time loop drives
+rendering + input via BLT's immediate-mode API (there is no blocking
+event loop — `terminal_open()` returns immediately after the non-modal
+Cocoa patch, and the loop calls `refresh()`/`has_input()`/`read()` per
+frame).
 
 ## Vendored dependencies
 
 - `vendor/luajit` — vendored LuaJIT, built once into `libluajit.a` + the
   `luajit` bytecode-compiler tool.
-- `vendor/libtcod` — shallow clone of the libtcod git repo. Built as a
-  static library via CMake; CMake's `FetchContent` pulls SDL3, zlib,
-  lodepng, utf8proc, and stb into `build/libtcod/_deps`.
+- `vendor/bearlibterminal` — shallow clone of the BearLibTerminal repo.
+  Built as a static library via CMake; BLT ships its own FreeType +
+  PicoPNG + NanoJPEG in-tree (under `Terminal/Dependencies/`), so there
+  are NO external git deps — only macOS frameworks (OpenGL + Cocoa).
+- `vendor/fonts` — DejaVu TTFs (Sans, SansMono, Serif). SansMono is the
+  base tileset (anti-aliased ASCII + box-drawing + block-element glyphs);
+  Sans is loaded at the Private Use Area (0xE000+) for the messages
+  panel. BLT's global codespace resolves per-cell by codepoint, so both
+  fonts coexist on screen simultaneously.
 
 ## Build flow (see `justfile`)
 
 1. `build-luajit` — `make` in `vendor/luajit`.
 2. `compile-bytecode` — `luajit -b` per `.lua` → `build/bytecode_*.h`,
    plus generated `includes.inc` / `modules.inc`.
-3. `compile-libtcod` — `cmake -S vendor/libtcod -B build/libtcod`
+3. `compile-blt` — `cmake -S vendor/bearlibterminal -B build/bearlibterminal`
    with `BUILD_SHARED_LIBS=OFF`, then `cmake --build`.
-4. `compile-binary` — clang links `src/main.c` + `libluajit.a` + every
-   `.a` under `build/libtcod` with `-Wl,-export_dynamic`.
+4. `compile-binary` — clang links `src/main.c` + `libluajit.a` +
+   `libBearLibTerminal.a` + `libfreetype2.a` + `libpicopng.a` with
+   `-Wl,-export_dynamic`.
 
-The `-export_dynamic` link flag is what lets `ffi.C` resolve libtcod
-symbols: it exports the executable's symbols into the dynamic symbol
-table so LuaJIT's dlsym-based lookup finds them.
+The `-export_dynamic` link flag is what lets `ffi.C` resolve BLT symbols
+(`terminal_put`, `terminal_set8`, etc.): it exports the executable's
+symbols into the dynamic symbol table so LuaJIT's dlsym-based lookup
+finds them.
+
+### Required BLT patch
+
+BLT's `CocoaWindow::Construct()` calls `[NSApp run]`, a modal run loop
+that blocks until the app terminates — incompatible with a Lua host that
+owns the main thread. The vendored source is patched to call
+`[NSApp finishLaunching]` + `activateIgnoringOtherApps:` instead; BLT's
+`PumpEvents()` (called from `refresh()`/`read()`) drives the run loop
+iteratively, as it does on Linux/Windows.
 
 ## OOP convention
 
@@ -255,12 +275,16 @@ events.
 
 ## FFI wrapper convention
 
-Every typed wrapper (`tcod.lua`) routes resource cleanup through
-`gc.wrap_gc` (in `gc.lua`) so there is one consistent RAII protocol.
-C functions returning `TCOD_Error` are checked and converted to
-`(nil, errmsg)` Lua tuples; the message comes from `TCOD_get_error()`.
+The BLT wrapper (`industrialworld/blt.lua`) binds the BLT C API via
+`industrialworld/blt_ffi.lua` (ffi.cdef of the exported `terminal_*`
+symbols; the `static inline` wrappers in BearLibTerminal.h are NOT
+dlsym-able, so we bind their underlying `*8` variants and reimplement
+the sugar in Lua). Color is a packed `uint32_t ARGB` (via the `bit`
+library). The `Console` shim presents a console-buffer-shaped API
+(`put_rgb`/`put_char`/`print`/`width`/`height`) over BLT's immediate-mode
+scene so call sites stay readable; layered UI (the messages panel)
+uses a higher codepoint range (0xE000+) to route glyphs through the
+second tileset.
 
-When adding a new libtcod binding, follow the existing pattern in
-`tcod.lua`: add the `ffi.cdef` entry in `tcod_ffi.lua`, then add a
-typed method/class in `tcod.lua` that checks errors and owns the
-pointer via `gc.wrap_gc`.
+When adding a new BLT binding, add the `ffi.cdef` entry in
+`blt_ffi.lua`, then a typed method in `blt.lua`.

@@ -1,7 +1,7 @@
 --- FFI memory management helpers for RAII via ffi.gc.
 ---
 --- Provides shared GC lifecycle primitives used by all typed FFI wrapper
---- modules (libtcod, etc.). Every FFI resource that needs deterministic
+--- modules (BearLibTerminal, etc.). Every FFI resource that needs deterministic
 --- cleanup goes through wrap_gc so the protocol is consistent across
 --- the codebase.
 ---

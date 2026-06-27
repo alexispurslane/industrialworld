@@ -27,8 +27,6 @@ local PhysicsObject = require("mixins.physics_object")
 local Collision = require("collision")
 local Drawable = require("mixins.drawable")
 local Renderable = require("mixins.renderable")
-local tile = require("tile")
-local world = require("world")
 local bus = require("event")
 local log = require("log")
 local L = log.get("player")
@@ -65,34 +63,11 @@ function Player:init(x, y, z)
     end)
     L:debug("spawned at (%d,%d,%d) -> settled (%.0f,%.0f,%d)", x, y, z, self.x, self.y, self.z)
 end
-
---- Draw the player, but with the bg taken from the tile under it (so the
---- "@" sits on the floor's bg, not black). Reads the tile type at the
---- player's cell, looks up its appearance, and uses that appearance's bg
---- as the glyph's bg. Override-and-extend on Drawable:draw (identity-
---- specific to Player — law 3 says identity behavior lives in the
---- subclass), delegating parent positioning to super.draw and the glyph
---- drawing to Renderable.draw with a per-call bg override.
----@param console iw.Console
----@param cam table
-function Player:draw(console, cam)
-    local cols = console:width()
-    local rows = cam.view_rows or console:height()
-    local sx = math.floor(self.x) - cam.x + math.floor(cols / 2)
-    local sy = math.floor(self.y) - cam.y + math.floor(rows / 2)
-    if sx < -1 or sx > cols or sy < -1 or sy > rows then
-        return
-    end
-    -- Look up the tile under the player and borrow its bg.
-    local tv = world.map.types:index(math.floor(self.x), math.floor(self.y), self.z)
-    local appear = tile.defs[tv]
-    local bg = appear and appear.bg or self.bg
-    -- Renderable.draw draws each glyph; pass our looked-up bg as the
-    -- per-glyph bg override (Renderable honors `g.bg` over `self.bg`).
-    -- We can't call super.draw here because it would draw with self.bg;
-    -- instead replicate the one-glyph case with the override.
-    local g0 = self.glyphs[1]
-    console:put_rgb(sx + g0.dx, sy + g0.dy, g0.ch, g0.fg or self.fg, bg)
-end
+--- Player overrides draw? No. With BLT layering, entities draw on layer 1
+--- (fg-only, transparent) via Renderable.draw, so the floor bg painted by
+--- render_map shows through automatically — no tile-bg lookup hack and no
+--- per-subclass override needed. Drawable.draw → Renderable.draw handles
+--- the player the same as any other entity. (law 3: behavior that isn't
+--- identity-specific doesn't belong in the subclass.)
 
 return Player

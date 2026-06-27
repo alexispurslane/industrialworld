@@ -100,9 +100,10 @@ local function lerp_color(c, target, t)
 end
 
 --- Draw a single string at (x, y) with the given fg + panel bg, char by
---- char via put_rgb (so we control per-message color without touching
---- console defaults). Truncates to `maxw` cells. Byte-length truncation
---- is fine here — all current messages are ASCII.
+--- char via put_serif (so we control per-message color + the message
+--- font). Full cellsize (one line per cell row), matching the tiles.
+--- Truncates to `maxw` cells. Byte-length truncation is fine here — all
+--- current messages are ASCII.
 ---@param con iw.Console
 ---@param x integer
 ---@param y integer
@@ -116,16 +117,17 @@ local function draw_line(con, x, y, str, fg, maxw)
     end
     for i = 1, n do
         local ch = str:byte(i)
-        con:put_rgb(x + i - 1, y, ch, fg, PANEL_BG)
+        con:put_serif(x + i - 1, y, ch, fg, PANEL_BG)
     end
 end
 
 --- Paint the panel: a rule line across the top reserved row, then the
 --- last (PANEL_H-1) buffered messages bottom-aligned (newest at the
---- bottom). Older visible messages are dimmed toward DIM_TARGET by age.
---- Any cells in the panel not covered by a message row are filled with
---- the panel bg so stray map/entity glyphs from the map pass don't bleed
---- through (the panel is drawn LAST in the frame, over the map).
+--- bottom) drawn in the sans-serif message font at full cellsize.
+--- Older visible messages are dimmed toward DIM_TARGET by age. Any cells
+--- in the panel not covered by a message row are filled with the panel bg
+--- so stray map/entity glyphs from the map pass don't bleed through (the
+--- panel is drawn LAST in the frame, over the map).
 ---@param con iw.Console
 function messages.draw(con)
     local W = con:width()
