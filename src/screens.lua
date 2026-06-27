@@ -95,9 +95,6 @@ end
 ----------------------------------------------------------------------------------------------------
 
 function screens.GameScreen(con)
-    local view_rows = con:height() - messages.PANEL_H
-    world.cam.view_rows = view_rows
-
     return {
         update = function(dt)
             world.update(dt)
@@ -105,6 +102,10 @@ function screens.GameScreen(con)
 
         draw = function()
             con:clear()
+            -- Recompute each frame so a window resize takes effect
+            -- immediately (the console shim's size is updated on resize).
+            local view_rows = con:height() - messages.PANEL_H
+            world.cam.view_rows = view_rows
             world.render_map(con, view_rows)
             world.draw_entities(con)
             messages.draw(con)

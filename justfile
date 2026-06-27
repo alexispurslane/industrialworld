@@ -7,7 +7,7 @@
 # ffi.C can dlsym BearLibTerminal symbols (terminal_put, etc.) straight
 # out of the executable.
 #
-# Requires: clang, cmake, make, git. No system libs beyond macOS
+# Requires: clang, cmake, make. No system libs beyond macOS
 # frameworks (OpenGL + Cocoa).
 
 CC       := "clang"

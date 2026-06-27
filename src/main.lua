@@ -65,6 +65,7 @@ local function main()
     local cfg = table.concat({
         "window.title='industrialworld'",
         "window.size=" .. cols .. "x" .. rows,
+        "window.resizeable=true",
         "window.cellsize=16x16",
         "font: vendor/fonts/MonosquareExtended.ttf, size=24x24, mode=monochrome, align=center, use-box-drawing=false, use-block-elements=false, hinting=normal",
         "0xE000: vendor/fonts/DejaVuSans.ttf, size=16x16, align=center, hinting=normal",
@@ -93,7 +94,7 @@ local function main()
     -- Wire the message log: subscribe to the `message` event on the bus
     -- (systems narrate via `bus.emit("message", text, fg)`) and seed it
     -- with a welcome banner so the panel isn't empty on first frame.
-    messages.init()
+    messages.init(con)
     bus.emit("message", "Welcome to industrialworld.", palette.text)
 
     -- Simple test map for the gravity model (FLOOR IS SOLID ground; walk in
@@ -253,6 +254,21 @@ local function main()
             -- General raw-key channel: keypress:<vk>.
             bus.emit(("keypress:%d"):format(vk))
 
+            -- Window events: close button and resize.
+            if vk == key.tk_close then
+                bus.emit("quit")
+            elseif vk == key.tk_resized then
+                local w = blt.state(key.tk_width)
+                local h = blt.state(key.tk_height)
+                con.w = w
+                con.h = h
+                view_rows = h - messages.PANEL_H
+                world.cam.view_rows = view_rows
+                -- The message log spans the full width; update its bounds.
+                messages.on_resize(w)
+                L:info("window resized to %dx%d (view_rows=%d)", w, h, view_rows)
+            end
+
             -- Mouse events. Clicks and hovers carry {x, y} data so UI
             -- widgets can test containment without knowing the console.
             if vk == key.tk_mouse_move then
@@ -328,6 +344,9 @@ local function main()
         if game_state.is(game_state.Mode.Playing) then
             world.update(dt)
         end
+
+        -- UI widgets always tick (anchors, animations) regardless of state.
+        world.update_widgets(dt)
 
         -- 4. Render + present.
         current_screen:draw()

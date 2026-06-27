@@ -859,4 +859,23 @@ function world.update(dt)
     end
 end
 
+--- Advance every living widget's `:update(dt)` hook. Mirrors
+--- world.update but for the widget pool. Called every frame by main.lua
+--- (regardless of game state) so UI mixins like Anchor can recompute.
+---@param dt number
+function world.update_widgets(dt)
+    local a = world.widgets_alive
+    local slots = world.widgets_slots
+    local n = world.widgets_capacity
+    for i = 1, n do
+        if a[i - 1] == 1 then
+            local w = slots[i]
+            local u = w.update
+            if u ~= nil then
+                u(w, dt)
+            end
+        end
+    end
+end
+
 return world

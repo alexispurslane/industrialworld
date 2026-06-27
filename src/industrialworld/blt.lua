@@ -399,5 +399,6 @@ return {
     tk_end = 0x4D,
     tk_p = 0x13,
     tk_close = 0xE0,
+    tk_resized = 0xE1,
     tk_key_released = 0x100,
 }
