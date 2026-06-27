@@ -48,15 +48,18 @@ local L = log.get("physics")
 local GRAVITY = world.GRAVITY
 local FRICTION = world.FRICTION -- default per-instance friction (see init)
 
--- Velocity below which a horizontal axis is considered "nearly stopped"
--- and gets SOFT-SNAPPED to the cell boundary in its direction of last
--- motion (see `soft_snap_axes`). Tuned so the integrator's friction tail
--- — which asymptotes toward zero — is completed discretely once the
--- remaining displacement is sub-cell-per-frame: at 60fps an axis below
--- this has < ~1 frame of motion left, so snapping is invisible. Makes a
--- tap land cleanly on a cell boundary and a run coast to a graceful stop
--- that finally re-grids.
-local SOFT_SNAP_V = 3.0 -- cells/sec
+-- Velocity below which a horizontal axis gets SOFT-SNAPPED to the cell
+-- boundary in its direction of last motion (see `soft_snap_axis`), but
+-- ONLY when no impulse was applied to that axis this frame (the gate in
+-- `update` step 5). Serves two purposes at once:
+--   * TAP re-grid: a short tap releases with a v below this threshold, so
+--     the next input-free frame snaps it cleanly to ~1 cell (the high
+--     STEP_ACCEL would otherwise build overshoot during multi-frame taps).
+--   * COAST termination: a genuine hold coasts (v decays exponentially via
+--     friction) until v drops below this threshold, then re-grids to the
+--     cell being entered — a graceful slide-to-stop. Co-sets the slide
+--     length: lower here = longer coast before re-grid; higher = snappier.
+local SOFT_SNAP_V = 10.0 -- cells/sec
 
 local PhysicsObject = mixin({}, Collidable)
 

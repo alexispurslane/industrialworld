@@ -62,7 +62,10 @@ local MEMORY_BRIGHTNESS = 0.35
 -- (SHUNT_VZ vertical / SHUNT_VH forward) in place of a teleport shunt.
 -- Exposed on `world` for callers (player, stairs, PhysicsObject).
 local GRAVITY = 20 -- cells/sec^2 downward (obeys_gravity entities)
-local STEP_ACCEL = 60 -- cells/sec^2 per arrow-key impulse (horizontal)
+local STEP_ACCEL = 150 -- cells/sec^2 per arrow-key impulse (horizontal)
+-- (high enough that holding crosses cell 1 by ~frame 5 for
+-- snappy response; SOFT_SNAP_V in PhysicsObject re-grids short
+-- taps to 1 cell so the high accel doesn't overshoot on taps)
 local FRICTION = 0.02 -- per-second horizontal velocity retention (0.02 = 2%/s)
 local SHUNT_VZ = 7 -- cells/sec upward/downward bump a stairs imparts
 local SHUNT_VH = 3 -- cells/sec forward bump a stairs imparts
