@@ -10,7 +10,7 @@ Right now the map renderer draws everything. A roguelike engine needs a
 visibility system so the player (and eventually NPCs) only see what they
 can see.
 
-- 2D or 3D FOV from the camera/player position.
+- DONE: 2D or 3D FOV from the camera/player position.
 - "Explored but not currently visible" rendering.
 - Optional dynamic light sources (torches, forges, windows).
 - Should feed into the existing render_map depth/ceiling pass, not fight
@@ -31,22 +31,22 @@ live in memory only.
 
 Buttons and progress bars are a good start, but a real game needs more.
 
-- Panel/frame primitive with borders and background fill.
-- Clipped / scrolling text areas (the message log already wants this).
-- Layout helpers so screens stop hand-computing `centered_x`.
+- DONE: Panel/frame primitive with borders and background fill.
+- DONE: Clipped / scrolling text areas (the message log already wants this).
+- DONE: Layout helpers so screens stop hand-computing `centered_x`.
 - Focus management and tab order for keyboard-driven UI.
-- Z-ordered widget layers and modal overlays.
-- A simple settings menu to prove the toolkit works end-to-end.
+- DONE: Z-ordered widget layers and modal overlays.
+- DONE: A simple settings menu to prove the toolkit works end-to-end.
 
 ## 4. Pathfinding and Spatial Queries
 
 Collision and occupancy exist, but there's no route-finding.
 
-- A* on the map grid, respecting z-levels, stairs, and ramps where
+- DONE: A* on the map grid, respecting z-levels, stairs, and ramps where
   appropriate.
-- Radius/circle queries for explosions, shouts, area effects.
-- Raycast for line-of-sight, projectiles, and ranged targeting.
-- Filter by collision mask / faction.
+- DONE: Radius/circle queries for explosions, shouts, area effects.
+- DONE: Raycast for line-of-sight, projectiles, and ranged targeting.
+- DONE: Filter by collision mask / faction.
 
 ## 5. Audio
 

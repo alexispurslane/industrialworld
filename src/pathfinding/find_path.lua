@@ -71,6 +71,7 @@ function find_path.run(opts)
     local out = {} -- reused neighbor accumulator
     local expanded = 0
     local budget = o.budget
+    local node_cap = o.node_cap
 
     while true do
         local cur, _ = heap.pop(open)
@@ -105,7 +106,15 @@ function find_path.run(opts)
         end
         state[cur] = CLOSED
         expanded = expanded + 1
-        if expanded > budget then
+        if expanded > node_cap then
+            return nil, "node_cap_exhausted", nil
+        end
+        -- COST budget: if the cheapest-popped cell's g-score already exceeds
+        -- `budget`, the goal (if reachable within budget) would have popped
+        -- by now (A* pops in f-order; an over-budget f >= g > budget). So the
+        -- goal is NOT within the cost radius. Distinguishes ``unreachable''
+        -- (none) from ``too far'' (budget) so callers can tell.
+        if budget ~= nil and gscore[cur] > budget then
             return nil, "budget_exhausted", nil
         end
 
@@ -122,13 +131,18 @@ function find_path.run(opts)
             local nc = grid.cell(w, h, nx, ny, nz)
             if state[nc] ~= CLOSED then
                 local tentative = gscore[cur] + step
-                if state[nc] ~= OPEN or tentative < gscore[nc] then
-                    parent[nc] = cur
-                    gscore[nc] = tentative
-                    local f = tentative + heuristic(o, nx, ny, nz, gx, gy, gz)
-                    heap.push(open, f, nc)
-                    if state[nc] ~= OPEN then
-                        state[nc] = OPEN
+                -- Skip cells already over the cost radius: they're outside
+                -- the requested budget (path too long); not pushing them
+                -- keeps the search bounded to the cost-radius frontier.
+                if budget == nil or tentative <= budget then
+                    if state[nc] ~= OPEN or tentative < gscore[nc] then
+                        parent[nc] = cur
+                        gscore[nc] = tentative
+                        local f = tentative + heuristic(o, nx, ny, nz, gx, gy, gz)
+                        heap.push(open, f, nc)
+                        if state[nc] ~= OPEN then
+                            state[nc] = OPEN
+                        end
                     end
                 end
             end

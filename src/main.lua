@@ -23,6 +23,7 @@ _G.enum = require("enums")
 -- every require return the same bus object, so all subscribers and all
 -- emitters share one registry.
 local ffi = require("ffi")
+local bit = require("bit")
 local blt = require("industrialworld.blt")
 local Entity = require("entity")
 local world = require("world")
@@ -165,6 +166,24 @@ local function main()
     local Stairs = require("stairs")
     Stairs(cx + 24, cy, 1, "up")
     Stairs(cx + 29, cy, 2, "down")
+
+    -- Mark sight-blocking terrain: every Wall cell carries the `Opaque`
+    -- flag, so native-3D FOV rays stop at walls AND at the solid z=2
+    -- ceiling (that's what "cuts off" upper layers except where the
+    -- alcove above carved it Open — a skylight the ray climbs through).
+    -- Floor and Open air are not opaque (you see across the floor; an
+    -- Open ceiling hole lets rays climb). One linear pass over the
+    -- types array sets the bit — robust to future wall placement.
+    local TF = tile_mod.TileFlags
+    local Opaque = TF.Opaque
+    local flags_cdata = m.flags.cdata
+    for i = 0, m.count - 1 do
+        if types[i] == TT.Wall then
+            flags_cdata[i] = bit.bor(flags_cdata[i], Opaque)
+        else
+            flags_cdata[i] = bit.band(flags_cdata[i], bit.bnot(Opaque))
+        end
+    end
 
     -- Spawn the player in the z=1 air at the room center. Player:init ->
     -- PhysicsObject.init -> fall(): cell below z=0 is Floor Solid -> rests

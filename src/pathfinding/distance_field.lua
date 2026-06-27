@@ -46,6 +46,7 @@ function distance_field.run(opts)
     local out = {}
     local expanded = 0
     local budget = o.budget
+    local node_cap = o.node_cap
 
     while true do
         local cur, _ = heap.pop(open)
@@ -57,7 +58,14 @@ function distance_field.run(opts)
         end
         state[cur] = CLOSED
         expanded = expanded + 1
-        if expanded > budget then
+        if expanded > node_cap then
+            return { gscore = gscore, status = "node_cap_exhausted", source = sc, parent = parent }
+        end
+        local cur_g = gscore[cur]
+        -- COST budget: once the cheapest-open cell already costs more than
+        -- `budget`, every remaining open cell is too (Dijkstra pops in
+        -- g-score order), so the cost-bounded region is complete.
+        if budget ~= nil and cur_g > budget then
             return { gscore = gscore, status = "budget_exhausted", source = sc, parent = parent }
         end
 
@@ -74,12 +82,18 @@ function distance_field.run(opts)
             local nc = grid.cell(w, h, nx, ny, nz)
             if state[nc] ~= CLOSED then
                 local tentative = gscore[cur] + step
-                if state[nc] ~= OPEN or tentative < gscore[nc] then
-                    parent[nc] = cur
-                    gscore[nc] = tentative
-                    heap.push(open, tentative, nc)
-                    if state[nc] ~= OPEN then
-                        state[nc] = OPEN
+                -- Don't relax cells already over the cost budget: they are
+                -- outside the requested reach radius; leaving them off the
+                -- heap keeps the cost-bounded region tight and lets cells
+                -- UNDER budget elsewhere still pop and expand.
+                if budget == nil or tentative <= budget then
+                    if state[nc] ~= OPEN or tentative < gscore[nc] then
+                        parent[nc] = cur
+                        gscore[nc] = tentative
+                        heap.push(open, tentative, nc)
+                        if state[nc] ~= OPEN then
+                            state[nc] = OPEN
+                        end
                     end
                 end
             end

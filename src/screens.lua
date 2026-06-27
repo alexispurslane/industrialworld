@@ -61,15 +61,9 @@ function screens.MenuScreen(con)
         end
     )
 
-    quit_btn = ui.button(
-        con,
-        centered_x(con, "[ESC] Quit"),
-        quit_y,
-        "[ESC] Quit",
-        function()
-            bus.emit("quit")
-        end
-    )
+    quit_btn = ui.button(con, centered_x(con, "[ESC] Quit"), quit_y, "[ESC] Quit", function()
+        bus.emit("quit")
+    end)
 
     return {
         update = function(dt) end,
@@ -106,6 +100,11 @@ function screens.GameScreen(con)
             -- immediately (the console shim's size is updated on resize).
             local view_rows = con:height() - messages.PANEL_H
             world.cam.view_rows = view_rows
+            -- Recompute the player's FOV (sets TileFlags.Visible; ORs
+            -- Explored) BEFORE render so the map paints the visible set
+            -- this frame. Cheapest placement: once per draw, right before
+            -- render_map / draw_entities read the flags.
+            world.update_fov()
             world.render_map(con, view_rows)
             world.draw_entities(con)
             messages.draw(con)

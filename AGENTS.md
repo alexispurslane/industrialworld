@@ -289,6 +289,119 @@ second tileset.
 When adding a new BLT binding, add the `ffi.cdef` entry in
 `blt_ffi.lua`, then a typed method in `blt.lua`.
 
+## Widgets (UI library)
+
+Immediate-mode-ish UI widgets live in `src/widgets/` (archetypes) and
+`src/mixins/ui/` (leaf capability mixins), re-exported/created via
+`src/widget.lua`. They are **engine objects, not game entities** — they
+have a position and ticks, but it is screen-space, not world-space, and
+they never participate in the entity update loop or collision. This is
+law 3/4 in action: `Widget` is the UI analogue of `Entity`, carrying
+SOLELY the UI lifecycle protocol (`init`/`update(dt)`/`draw`), and every
+capability is a mixin layered on top — never on the base.
+
+### Laws applied
+
+1. **`Widget` is a one-base, capa-from-mixins system — the second base
+   class.** It is the ONLY base for UI objects (just as `Entity` is the
+   only base for game objects). It owns nothing but the lifecycle hooks.
+   Screens, buttons, panels, bars are all `Widget` + mixins.
+2. **Capabilities are mixins under `src/mixins/ui/`.** Each bundles its
+   own state + methods for one narrow UI concern:
+   - `ScreenRect` — screen-space bounds (`screen_x/y/w/h`) + `_contains`,
+     the hit-test primitive every spatial mixin depends on.
+   - `Hoverable` / `Clickable` — reactive state + bus subscriptions.
+   - `Label` / `ProgressFill` / `TextPanel` — rendering mixins.
+   - `Anchor` — semantic side/alignment positioning against a target rect.
+   Mix these onto an archetype; don't reach into `_G` or hold cross-widget
+   references — route through `bus` (law/event-bus convention).
+3. **`self` is flat (law 5).** A widget's state (`screen_x`, `text`,
+   `hovered`, `percent`, `lines`, `scroll`, ...) lives un-namespaced on
+   the instance. A composed mixin reads/writes sibling-leaf state directly
+   (e.g. `Hoverable` reads nothing extra, but `MessageLog:add_line` reads
+   `self.lines`, which `TextPanelMixin` set). No per-mixin subtables.
+4. **Archetypes are `src/widgets/*.lua` — identity-specific presets.**
+   `Button`, `TextPanel`, `MessageLog`, `ProgressBar` subclass `Widget`
+   (+ mixins) and carry ONLY identity behavior (`MessageLog`'s dedup,
+   age-dimming, and rule line; `Button`'s hover-color swap + click
+   dispatch). Cross-capability orchestration that is reusable across
+   archetypes still belongs in a mixin, not a subclass (law 2).
+5. **Subclassing lifts via hooks, not overrides, for rendering.**
+   `TextPanelMixin:draw` calls `self:line_text(entry, row, h)` and
+   `self:line_color(...)` per visible row — default impls return the
+   stored text/future. A subclass overrides THOSE hooks (not `draw`) to
+   customize rendering (`MessageLog` stamps `xN` repeat counters and
+   dims by age). This keeps the layout/scrolling logic in one place.
+
+### Mechanics (lifecycle + init order)
+
+- **Pooled, like entities.** `Widget.new` routes through
+  `world.allocate_widget` (which assigns a recycled slot, an alive bit,
+  and a monotonic `_z` for topmost ordering); `Widget:destroy` routes
+  through `world.destroy_widget`, which walks `w._unsubs` (newest-first)
+  then marks the slot dead — so a destroyed widget stops reacting. The
+  pool grows lazily. Allocate via the constructor: `Button(con, x, y,
+  text, cb)`, never `Button.new` directly from call sites.
+- **Explicit, ordered init chain.** There is no auto-`super`; every
+  `init` is called by name from the subclass `init`, in dependency order:
+  screen-space mixins BEFORE reactive/rendering ones (ScreenRect sets
+  `screen_x/y`, which `Hoverable`/`Clickable`/`Label`/`ProgressFill`/
+  `TextPanel` all assert on). Then set `self.con` (the `Console` shim)
+  before `draw` runs. A working `init` looks like:
+  ```lua
+  function Button:init(con, x, y, text, cb, fg, fg_hover)
+      self.con = con
+      super.init(self)            -- one-level parent no-op
+      ScreenRect.init(self, x, y, #text, 1)
+      Label.init(self, text, fg or palette.text)
+      Hoverable.init(self)
+      Clickable.init(self)
+      ...
+  end
+  ```
+  Forgetting to call a mixin init leaves its state nil and the assertions
+  in the next mixin down the chain catch it — that is the intended fast
+  failure, do not weaken the asserts.
+- **Mouse input is centralized, NOT per-widget.** Widgets do not touch raw
+  mouse coords. `main.lua` polls the cursor, calls
+  `world.widget_topmost({x,y}, flag)` (flag = `"_clickable"` /
+  `"_hoverable"`) to find the topmost living widget at that position with
+  that capability (using `ScreenRect._contains`), and emits a TARGETED
+  event carrying identity + coords:
+  `bus.emit("widget:click", { widget=clicked, x=mx, y=my, button=vk })`
+  and the matching `widget:hover` with `state`.
+  `Clickable`/`Hoverable` subscribe to those events (via `bus.subscribe`
+  so teardown is tracked), filter on `p.widget == self`, and dispatch to
+  `self:on_click(x,y,button)` / `self:on_hover` / `self:on_hover_changed`.
+  Want a clickable widget? Mix `Clickable` (and a bounds mixin) — never
+  subscribe to a raw mouse channel from a widget.
+- **Game-semantic input still goes through `bus` for data-driven feed.**
+  `TextPanelMixin` subscribes to a named event (`event_name` passed at
+  init) for appended lines; `ProgressBar` subscribes to
+  `progress:<id>` / `progress:<id>:destroy`. This keeps the feed decoupled
+  from the producer — emit `bus.emit("message", text, fg)` and any
+  `MessageLog` listening on `"message"` picks it up.
+
+### Adding a widget
+
+- **New capability?** Add a leaf mixin in `src/mixins/ui/<name>.lua` as a
+  plain local table `{}`; `init(self, ...)` its state onto the flat `self`
+  (with the asserts that encode its prerequisites), and any `(self, ...)`
+  methods. If it listens to the bus, subscribe via `bus.subscribe(self,
+  ...)` for teardown.
+- **New archetype?** `src/widgets/<name>.lua` subclassing `Widget`
+  (`local Foo, super = class("Foo", Widget):mixin(M1, M2, ...)`).
+  Call `super.init(self)` then each mixin's init in dependency order, set
+  `self.con`, and implement identity-specific overrides (or the
+  `line_text`/`line_color` style hooks for `TextPanel` subclasses). Render
+  by delegating: `function Foo:draw() Label.draw(self) end` (or compose).
+- **Want it to render a new glyph/style?** Add the typed method to
+  `blt.lua` (FFI wrapper convention) and call it from the widget's `draw`.
+- **Don't** add a second base class for UI (law 4: one base, `Widget`),
+  **don't** put cross-capability orchestration in a subclass (use a
+  mixin), and **don't** give a widget a world position or make it tick in
+  the entity loop — widgets tick in `world.update_widgets(dt)` only.
+
 ## Pathfinding & spatial queries
 
 Routing and reach primitives over the engine's z-major grid live in
@@ -298,8 +411,24 @@ algorithm-named** so you can tell when to reach for them: `find_path`
 (one A→B route), `distance_field` (cost from one cell to all reachable),
 `descent_field` / `descent_step` (one search feeding many NPCs to one
 target), `flood` (connectivity / wall-respecting radius), `raycast`,
-`line_of_sight`, `within_radius` / `within_sphere` (pure-geometric
-extents). Each module carries a `WHEN TO USE THIS` / `WHEN NOT TO`
-docstring — **consult those to pick the right function**; this note is
-only a pointer. FOV/lighting is intentionally NOT here (see FUTURE_WORK
-#1); a future `src/fov.lua` will reuse `pf.raycast` + the `Opaque` flag.
+`within_radius` / `within_sphere` (pure-geometric extents). Each module
+carries a `WHEN TO USE THIS` / `WHEN NOT TO` docstring — **consult those
+to pick the right function**; this note is only a pointer. **SIGHT lives
+elsewhere**: `src/fov.lua` (`local fov = require("fov")`) — `fov.line_of_sight`
+(the single-pair boolean), `fov.visible_tiles`/`fov.visible_entities`/
+`fov.visible_from_set`/`fov.can_see`/`fov.can_see_from_set` — NATIVELY 3D
+(Amanatides-&-Woo voxel DDA via `pf.raycast3d`), so rays climb through
+layers and are blocked by any `Opaque` voxel; a solid ceiling cuts off
+upper layers except where it's `Open` (a skylight). The world wires this
+up each frame: `world.update_fov()` recomputes `TileFlags.Visible` from
+the camera (player) cell (constant-radius 3D sphere, `world.VISION_RANGE`/
+`VISION_SHAPE`) and ORs `TileFlags.Explored` (memory = ever-seen union).
+`world.render_map` is DEFAULT-DARK: cells with neither flag render
+nothing; Visible cells render full-shaded; Explored-but-not-Visible render
+dimmed (`MEMORY_BRIGHTNESS` × the depth/height shade). Visible above-
+layer cells (z > cam.z) additionally get an x-ray hole
+(`xray_alpha` rings) carved around the player. `world.draw_entities` only
+draws entities on Visible cells (memory shows NO entities). Set `Opaque`
+on Wall terrain (main.lua does a linear pass). **WALKING-REACH ergonomics**
+(mirroring the FOV API shape) live in `src/reach.lua`
+(`local reach = require("reach")`) over `pf.flood` + `pf.find_path`.

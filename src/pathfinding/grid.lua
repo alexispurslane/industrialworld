@@ -15,8 +15,11 @@
 -- flying, or arbitrary portals.
 
 local ffi = require("ffi")
-local tile = require("tile")
-
+--- `tile` is required lazily inside `default_transition` (the only place the
+--- pathfinding package touches it) so that loading `pathfinding.grid` —
+--- and thus `raycast`/`line_of_sight`/`fov`/`reach` — does NOT drag in the
+--- tile/render-mixin graph at require time. `default_transition` runs at
+--- search time, when the full engine is up and `tile` is available.
 local grid = {}
 
 -- Lateral neighbor offsets. 4-cardinal always; +4 diagonals when enabled.
@@ -49,6 +52,7 @@ function grid.default_transition(x, y, z, opts)
     if map == nil then
         return function() end
     end
+    local tile = require("tile") -- lazy: see module header
     local t = map.types:index(x, y, z)
     local TileType = tile.TileType
     -- StairsUp: also go up; StairsDown: also go down; Ramp: both.
@@ -119,7 +123,18 @@ function grid.normalize(opts)
         occupied = occupied,
         transition = transition,
         map = opts.map, -- optional; default_transition reads .types
-        budget = opts.budget or (2 ^ 20), -- safety cap on nodes expanded
+        -- `budget` is a COST cap (max g-score we'll expand past): the
+        -- ``how far can I reach'' radius, uniformly across ALL searchers
+        -- (flood, distance_field, find_path). A cell whose cost-to-reach
+        -- exceeds budget is not expanded/returned. nil => unbounded.
+        -- This is SEPARATE from the hardcoded runaway cap below, which is
+        -- always-on protection against pathological A*/Dijkstra blowups on
+        -- huge maps; callers can't raise it.
+        budget = opts.budget,
+        -- Internal runaway-safety cap on NODES EXPANDED (not cost), so a
+        -- search over a vast connected map can't loop forever when budget
+        -- is nil. Not caller-facing; sized generously for the engine map.
+        node_cap = opts._node_cap or (2 ^ 20),
     }
 end
 

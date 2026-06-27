@@ -48,6 +48,7 @@ function flood.run(opts)
     local queue = { sc }
     local qhead = 1
     local reached = { { sx, sy, sz } }
+    local budget = opts.budget -- nil => unbounded (cost cap: max g-score)
 
     local out = {}
     while qhead <= #queue do

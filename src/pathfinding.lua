@@ -15,12 +15,20 @@
 --   occupied(x,y,z)->bool          -- dynamic blocker (live entities)
 --   transition(x,y,z,opts)->iter   -- z-edges; default reads TileType stairs/ramp
 --   diagonal = true                 -- 8-dir (octile, no corner cutting)
---   budget = N                      -- cap nodes expanded (safety)
+--   budget = N                      -- COST cap: max path-cost expanded
+--                                   -- (``reach radius''; nil => unbounded).
+--                                   -- Uniform across ALL searchers
+--                                   -- (flood/distance_field/find_path): a
+--                                   -- cell whose cost-to-reach exceeds it
+--                                   -- is not expanded/returned. A separate
+--                                   -- always-on runaway-safety NODE cap is
+--                                   -- applied internally (not caller-set).
 --
--- The queries (raycast/line_of_sight/within_radius/within_sphere) take a
--- slimmer opts; see each module. FOV/lighting is intentionally NOT here
--- — see FUTURE_WORK #1; a future src/fov.lua will reuse
--- pathfinding.raycast + the Opaque flag.
+-- The queries (raycast/within_radius/within_sphere) take a slimmer opts;
+-- see each module. SIGHT is not here — it lives in `fov`
+-- (`require("fov")`; `fov.line_of_sight` is the single-pair boolean,
+-- `fov.visible_*`/`fov.can_see` are the many-at-once forms), reusing
+-- `pathfinding.raycast` + the map's Opaque flag.
 
 local M = {}
 
@@ -30,7 +38,7 @@ M.descent_field = require("pathfinding.descent_field").run
 M.descent_step = require("pathfinding.descent_field").step
 M.flood = require("pathfinding.flood").run
 M.raycast = require("pathfinding.raycast").run
-M.line_of_sight = require("pathfinding.line_of_sight").run
+M.raycast3d = require("pathfinding.raycast3d").run
 M.within_radius = require("pathfinding.shapes").within_radius
 M.within_sphere = require("pathfinding.shapes").within_sphere
 
