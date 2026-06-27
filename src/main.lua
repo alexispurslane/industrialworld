@@ -237,6 +237,7 @@ local function main()
     -- Last cell reported by a mouse-move event, for deduplicating hover
     -- emits when the input queue contains multiple movement events.
     local last_mx, last_my = -1, -1
+    local hover_widget = nil
 
     local last = os.clock()
     local FRAME_TIME = 1 / 60 -- target 60 FPS
@@ -259,12 +260,29 @@ local function main()
                 local my = blt.state(blt.tk_mouse_y)
                 if mx ~= last_mx or my ~= last_my then
                     bus.emit("mouse_hover", { x = mx, y = my })
+
+                    local current_hover = world.widget_topmost({ x = mx, y = my }, "_hoverable")
+                    if current_hover ~= hover_widget then
+                        if hover_widget then
+                            bus.emit("widget:hover", { widget = hover_widget, x = mx, y = my, state = false })
+                        end
+                        hover_widget = current_hover
+                        if hover_widget then
+                            bus.emit("widget:hover", { widget = hover_widget, x = mx, y = my, state = true })
+                        end
+                    end
+
                     last_mx, last_my = mx, my
                 end
             elseif vk >= key.tk_mouse_left and vk <= key.tk_mouse_middle then
                 local mx = blt.state(blt.tk_mouse_x)
                 local my = blt.state(blt.tk_mouse_y)
                 bus.emit("mouse_click", { x = mx, y = my, button = vk })
+
+                local clicked = world.widget_topmost({ x = mx, y = my }, "_clickable")
+                if clicked then
+                    bus.emit("widget:click", { widget = clicked, x = mx, y = my, button = vk })
+                end
             end
 
             -- State-bound input.

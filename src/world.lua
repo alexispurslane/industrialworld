@@ -103,10 +103,16 @@ local function lerp_color(a, b, t)
     }
 end
 
+local INITIAL_WIDGET_CAP = 256
+
 local world = {
     capacity = INITIAL_ENTITY_CAP,
     slots = {}, -- slots[1..capacity] = pooled Lua tables, pre-allocated below
     alive = ffi.new("uint8_t[?]", INITIAL_ENTITY_CAP), -- 0=dead, 1=alive (0-based)
+    widgets_capacity = INITIAL_WIDGET_CAP,
+    widgets_slots = {}, -- UI widget pool (same shape as the entity pool)
+    widgets_alive = ffi.new("uint8_t[?]", INITIAL_WIDGET_CAP),
+    widgets_next_z = 1,
     map = Map(2000, 2000, 10), -- the game world's Map (schema-driven SoA; zero-filled)
     cam = { x = 1000, y = 1000, z = 9, z_offset = 0 }, -- camera center cell, z layer, + peek offset
     -- Spatial hash: cell_idx -> set of living entities at that cell.
@@ -121,9 +127,12 @@ local world = {
     _shade_max_depth = -1,
 }
 
--- Pre-allocate the pool of empty tables once.
+-- Pre-allocate the pools of empty tables once.
 for i = 1, world.capacity do
     world.slots[i] = {}
+end
+for i = 1, world.widgets_capacity do
+    world.widgets_slots[i] = {}
 end
 
 --- Wipe a pooled table's own fields so a recycled slot starts clean.
@@ -226,6 +235,100 @@ function world.destroy(e)
     if i ~= nil then
         world.alive[i - 1] = 0
     end
+end
+
+----------------------------------------------------------------------------------------------------
+-- Widget pool (mirrors the entity pool; no spatial hash, no map).
+----------------------------------------------------------------------------------------------------
+
+local function find_dead_widget_slot()
+    local a = world.widgets_alive
+    for i = 0, world.widgets_capacity - 1 do
+        if a[i] == 0 then
+            return i + 1
+        end
+    end
+    return nil
+end
+
+local function grow_widgets()
+    local old_cap = world.widgets_capacity
+    local new_cap = old_cap * 2
+    local new_alive = ffi.new("uint8_t[?]", new_cap)
+    ffi.copy(new_alive, world.widgets_alive, old_cap)
+    world.widgets_alive = new_alive
+    for i = old_cap + 1, new_cap do
+        world.widgets_slots[i] = {}
+    end
+    world.widgets_capacity = new_cap
+end
+
+--- Allocate a UI widget into the first dead slot (growing if needed),
+--- reusing the pooled table there. Called by Widget.new; create via
+--- `Cls(...)`.
+---@param cls table
+---@return table widget
+function world.allocate_widget(cls, ...)
+    local i = find_dead_widget_slot()
+    if i == nil then
+        grow_widgets()
+        i = find_dead_widget_slot()
+    end
+    local w = world.widgets_slots[i]
+    wipe(w)
+    setmetatable(w, cls)
+    if cls.init then
+        cls.init(w, ...)
+    end
+    w.__widget_slot = i
+    w._z = world.widgets_next_z
+    world.widgets_next_z = world.widgets_next_z + 1
+    world.widgets_alive[i - 1] = 1
+    L:debug("allocate widget %s -> slot %d", cls.__name or "?", i)
+    return w
+end
+
+--- Mark a widget's slot dead so it can be recycled. Runs mixin teardown
+--- (unsubscribes bus listeners) first, then clears the alive bit.
+---@param w table
+function world.destroy_widget(w)
+    local unsubs = rawget(w, "_unsubs")
+    if unsubs ~= nil then
+        for i = #unsubs, 1, -1 do
+            unsubs[i]()
+        end
+        w._unsubs = nil
+    end
+    local i = rawget(w, "__widget_slot")
+    L:debug("destroy widget %s slot %s", w.__name or "?", tostring(i))
+    if i ~= nil then
+        world.widgets_alive[i - 1] = 0
+    end
+end
+
+--- Find the topmost living widget under `pos` with the given capability
+--- flag (`_hoverable` or `_clickable`). Later allocations sit higher in
+--- z-order, matching draw order.
+---@param pos table   {x=, y=}
+---@param flag string "_hoverable" | "_clickable"
+---@return table|nil
+function world.widget_topmost(pos, flag)
+    local best, best_z = nil, -1
+    local n = world.widgets_capacity
+    local alive = world.widgets_alive
+    local slots = world.widgets_slots
+    for i = 1, n do
+        if alive[i - 1] == 1 then
+            local w = slots[i]
+            if w[flag] and w._contains and w:_contains(pos) then
+                if w._z > best_z then
+                    best_z = w._z
+                    best = w
+                end
+            end
+        end
+    end
+    return best
 end
 
 ----------------------------------------------------------------------------------------------------
