@@ -41,7 +41,7 @@ end
 ---@param cam table  `{x=,y=,z=}` — the camera (center cell + z layer).
 function Drawable:draw(console, cam)
     local cols = console:width()
-    local rows = console:height()
+    local rows = cam.view_rows or console:height()
     local sx = math.floor(self.x) - cam.x + math.floor(cols / 2)
     local sy = math.floor(self.y) - cam.y + math.floor(rows / 2)
     if sx < -1 or sx > cols or sy < -1 or sy > rows then

@@ -27,6 +27,7 @@ local Entity = require("entity")
 local world = require("world")
 local bus = require("event")
 local log = require("log")
+local messages = require("messages")
 local L = log.get("main")
 
 -- Log floor: override via the IW_LOG env var ("trace"/"debug"/"info"/...).
@@ -70,6 +71,20 @@ local function main()
     end
 
     log.get("main"):info("industrialworld ready (%dx%d) log=%s", cols, rows, env_lvl or "info")
+
+    -- The message log panel reserves the bottom PANEL_H rows of the
+    -- console. Compute the visible map region height once and stash it on
+    -- the camera each frame so render_map + entity draws center + cull
+    -- against the VISIBLE map region (above the panel), not the full
+    -- console. Set before any render call this frame.
+    local view_rows = rows - messages.PANEL_H
+    world.cam.view_rows = view_rows
+
+    -- Wire the message log: subscribe to the `message` event on the bus
+    -- (systems narrate via `bus.emit("message", text, fg)`) and seed it
+    -- with a welcome banner so the panel isn't empty on first frame.
+    messages.init()
+    bus.emit("message", "Welcome to industrialworld.", { r = 220, g = 220, b = 225 })
 
     -- Simple test map for the gravity model (FLOOR IS SOLID ground; walk in
     -- the OPEN AIR cell above it; gravity rests when the cell below is Solid):
@@ -153,9 +168,12 @@ local function main()
 
     -- Render the map and present.
     con:clear()
-    world.render_map(con)
+    world.render_map(con, view_rows)
     -- Draw entities (any living slot with a `draw` method) on top of the map.
     world.draw_entities(con)
+    -- Message log panel (drawn last so it overwrites any stray glyphs in
+    -- its reserved bottom rows).
+    messages.draw(con)
     ctx:present(con)
 
     -- Keybinds (raw vk -> semantic emit). The real-time loop below drains
@@ -238,8 +256,9 @@ local function main()
 
         -- 4. Render + present.
         con:clear()
-        world.render_map(con)
+        world.render_map(con, view_rows)
         world.draw_entities(con)
+        messages.draw(con)
         ctx:present(con)
 
         -- 5. Cap framerate. vsync (set on context creation) already

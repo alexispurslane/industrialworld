@@ -344,15 +344,22 @@ end
 ---      the current layer + player stay visible through the ceiling.
 --- Tiles with a `connect` spec resolve their glyph per-cell (box-drawing
 --- walls etc.); other tiles use their cached fixed glyph.
+--- The map renders into rows 0..view_rows-1 (the VISIBLE map region,
+--- above the message panel). `view_rows` defaults to `cam.view_rows` if
+--- set by the caller (main.lua reserves PANEL_H rows at the bottom),
+--- else the full console height. The camera centers in this region so
+--- the player sits mid-screen of the VISIBLE area, not the full console.
 ---@param con table  tcod.Console
-function world.render_map(con)
+---@param view_rows? integer  usable map rows (default cam.view_rows or con:height()).
+function world.render_map(con, view_rows)
     local cam = world.cam
     local map = world.map
     local W, H = map.w, map.h
     local D = map.d
     local cols, rows = con:width(), con:height()
+    local vrows = view_rows or cam.view_rows or rows
     local ox = cam.x - math.floor(cols / 2)
-    local oy = cam.y - math.floor(rows / 2)
+    local oy = cam.y - math.floor(vrows / 2)
     local above_count = (D - 1) - cam.z
     if
         world._shade == nil
@@ -368,7 +375,7 @@ function world.render_map(con)
         local d = cam.z - z
         local entry = shade[d]
         if entry ~= nil then
-            for cy = 0, rows - 1 do
+            for cy = 0, vrows - 1 do
                 local wy = oy + cy
                 if wy >= 0 and wy < H then
                     for cx = 0, cols - 1 do
@@ -400,7 +407,7 @@ function world.render_map(con)
         local h = z - cam.z
         local entry = above[h]
         if entry ~= nil then
-            for cy = 0, rows - 1 do
+            for cy = 0, vrows - 1 do
                 local wy = oy + cy
                 if wy >= 0 and wy < H then
                     local ddy = wy - cpy

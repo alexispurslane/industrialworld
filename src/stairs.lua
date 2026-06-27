@@ -117,6 +117,13 @@ function Stairs:init(x, y, z, direction)
                 mover.y or 0,
                 mover.z or 0
             )
+            -- Narrate the climb for the message log. Stairs knows its own
+            -- direction, so the prose lives here (the message module is a
+            -- dumb sink). Only narrate Player climbs for now — an NPC
+            -- shunting would spam the log without meaning to the player.
+            if mover.__name == "Player" then
+                bus.emit("message", d.dz > 0 and "You climb up." or "You climb down.", d.fg)
+            end
             bus.emit("moved", mover)
         else
             L:debug("[%s] shunt FAILED (landing blocked)", self.__name or "stairs")
