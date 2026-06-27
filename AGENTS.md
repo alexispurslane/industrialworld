@@ -288,3 +288,18 @@ second tileset.
 
 When adding a new BLT binding, add the `ffi.cdef` entry in
 `blt_ffi.lua`, then a typed method in `blt.lua`.
+
+## Pathfinding & spatial queries
+
+Routing and reach primitives over the engine's z-major grid live in
+`src/pathfinding/` (re-exported by `src/pathfinding.lua` — reach via
+`local pf = require("pathfinding")`). Functions are **purpose-named, not
+algorithm-named** so you can tell when to reach for them: `find_path`
+(one A→B route), `distance_field` (cost from one cell to all reachable),
+`descent_field` / `descent_step` (one search feeding many NPCs to one
+target), `flood` (connectivity / wall-respecting radius), `raycast`,
+`line_of_sight`, `within_radius` / `within_sphere` (pure-geometric
+extents). Each module carries a `WHEN TO USE THIS` / `WHEN NOT TO`
+docstring — **consult those to pick the right function**; this note is
+only a pointer. FOV/lighting is intentionally NOT here (see FUTURE_WORK
+#1); a future `src/fov.lua` will reuse `pf.raycast` + the `Opaque` flag.

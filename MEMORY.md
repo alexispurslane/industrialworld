@@ -13,13 +13,13 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- Archive:  monoretropixel.zip
 - tobytes? False — Fix: To actually make Monosquare *fill* a 16×16 cell, you'd need to either:
 - Validation failed for tool "ask_user_question": — Fix: we should use manual compositing with the colors on the lower layers for the bg, if what you say is true that BLT doesn't layer bgs; but use BLT's layering to composite the two *symbols* together
 - So symbols *can* be composited by BLT — only bg fills can't.
 - Could not find edits[0] in /Users/alexispurslane/Development/industrialworld/src/ui.lua. The oldText must match exactly including all whitespace and newlines.
+- on_resize(w)` all stay — only the live mid-drag redraw attempt (which crashed) is removed.
+- lua` are unrelated to this change and were already broken on `main`.
+- Cells you can't reach stay at 0 (unseen).
+- ## What a flow field actually is
 
-## Heavily Read
-
-- /Users/alexispurslane/Development/industrialworld/src/main.lua (3 reads)
-- /Users/alexispurslane/Development/industrialworld/src/ui.lua (3 reads)
+A flow field = descent field construction + a second step that, for every cell, encodes the *direction* to walk (one byte: 8 directions + "blocked" + "at goal").
