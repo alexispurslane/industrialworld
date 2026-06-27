@@ -215,6 +215,18 @@ function Console:refresh()
     C.terminal_refresh()
 end
 
+--- Set BLT compositing mode for subsequent puts on this console's scene.
+--- `Terminal::PutInternal2`: with composition ON, a `terminal_put` ADDS a
+--- glyph leaf to the cell without clearing existing leaves (so two glyphs
+--- in one cell — e.g. a ceiling symbol overlaid on a floor symbol — both
+--- render, the later one alpha-blended over the earlier by GL). With
+--- composition OFF (the default) a put CLEARS the cell's leaves first.
+--- Bg fills are still only honored on layer 0 regardless of mode.
+---@param on boolean
+function Console:composition(on)
+    C.terminal_composition(on and 1 or 0)
+end
+
 -- No-op: BLT owns the scene; shutdown is handled by close() at process exit.
 function Console:shutdown() end
 

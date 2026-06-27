@@ -19,6 +19,7 @@
 local ffi = require("ffi")
 local Map = require("map")
 local tile = require("tile")
+local blt = require("industrialworld.blt")
 local log = require("log")
 local L = log.get("world")
 
@@ -37,12 +38,69 @@ local MIN_BRIGHTNESS = 0.25
 local CEIL_FADE_PER_LEVEL = 0.35
 local CEIL_MIN_BRIGHTNESS = 0.3
 
--- Radius (cells) of the "skylight" hole cut into the ceiling layers
--- centered on the player. Within this disc the above layers are NOT drawn,
--- so the player + immediate surroundings stay visible; outside the disc the
--- above z-levels render dimmed. Squared for the distance test.
-local CEIL_HOLE_RADIUS = 5
-local CEIL_HOLE_R2 = CEIL_HOLE_RADIUS * CEIL_HOLE_RADIUS
+-- X-ray vision through roofs. Ceiling layers (z > cam.z) are drawn over
+-- the player's own layer on layer 0 with CONCENTRIC TRANSPARENCY RINGS
+-- centered on the player, so roofs fade out near the player (you see the
+-- room/player through them) and are fully opaque far away. BLT only honors
+-- a cell bg on layer 0, so per-tile transparency is done by MANUAL ALPHA
+-- COMPOSITING on layer 0: each ceiling tile's colors are lerped toward the
+-- below (player-layer) tile's colors by the ring's alpha, then overwriting
+-- layer 0. The fg box-drawing glyph of the ceiling is kept (tinted), so a
+-- roof reads as faint outline + dimmed fill over what's beneath.
+--
+-- Rings (by squared horizontal distance from the player cell):
+--   CORE  (r <= XRAY_CORE_R)  : alpha 0  → ceiling NOT drawn; the player's
+--                                own layer (at & below cam.z) shows fully.
+--   RING1 (CORE..RING1_R)     : alpha A1 → "very transparent" ceiling.
+--   RING2 (RING1..RING2_R)    : alpha A2 → "slightly less transparent".
+--   outside RING2             : alpha 1  → ceiling fully opaque (dimmed by
+--                                height, same as before the X-ray change).
+local XRAY_CORE_R = 8
+local XRAY_RING1_R = 10
+local XRAY_RING2_R = 12
+local XRAY_CORE_R2 = XRAY_CORE_R * XRAY_CORE_R
+local XRAY_RING1_R2 = XRAY_RING1_R * XRAY_RING1_R
+local XRAY_RING2_R2 = XRAY_RING2_R * XRAY_RING2_R
+local XRAY_ALPHA_RING1 = 0.18
+local XRAY_ALPHA_RING2 = 0.40
+
+-- Pure-black stand-in for the "below" color of a column that is Open air
+-- all the way down (nothing was drawn on layer 0 there beyond con:clear's
+-- default black bg); used by the ceiling compositing lerp.
+local BLACK = { r = 0, g = 0, b = 0 }
+
+--- Pick the ceiling opacity (0..1) for a cell at squared horizontal
+--- distance `r2` from the player cell. 0 = fully removed (core), 1 =
+--- fully opaque (outside all rings).
+---@param r2 number  squared dx*dx+dy*dy (horizontal only).
+---@return number alpha
+local function xray_alpha(r2)
+    if r2 <= XRAY_CORE_R2 then
+        return 0
+    elseif r2 <= XRAY_RING1_R2 then
+        return XRAY_ALPHA_RING1
+    elseif r2 <= XRAY_RING2_R2 then
+        return XRAY_ALPHA_RING2
+    end
+    return 1.0
+end
+
+--- Lerp two {r,g,b} colors by `t` (0 = `a`, 1 = `b`), floored to ints so
+--- the result is safe to feed into bit.lshift in blt.to_color.
+---@param a table
+---@param b table
+---@param t number
+---@return table
+local function lerp_color(a, b, t)
+    if t <= 0 then
+        return a
+    end
+    return {
+        r = math.floor(a.r + (b.r - a.r) * t),
+        g = math.floor(a.g + (b.g - a.g) * t),
+        b = math.floor(a.b + (b.b - a.b) * t),
+    }
+end
 
 local world = {
     capacity = INITIAL_ENTITY_CAP,
@@ -339,9 +397,10 @@ end
 ---      lower), each darkened toward black by depth below cam.z. Open is
 ---      clear (skipped) so lower layers show through.
 ---   2. Ceiling: draws z layers cam.z+1 .. ceil_top bottom-to-top, dimmed
----      by height above the camera — EXCEPT a disc of CEIL_HOLE_RADIUS
----      around the player (camera center) is left clear (a "skylight") so
----      the current layer + player stay visible through the ceiling.
+---      by height above the camera — with CONCENTRIC X-RAY RINGS around the
+---      player: the CORE disc removes the ceiling entirely (the current
+---      layer + player stay visible), surrounded by two progressively more
+---      opaque rings, fully opaque outside the outer ring (see xray_alpha).
 --- Tiles with a `connect` spec resolve their glyph per-cell (box-drawing
 --- walls etc.); other tiles use their cached fixed glyph.
 --- The map renders into rows 0..view_rows-1 (the VISIBLE map region,
@@ -399,42 +458,134 @@ function world.render_map(con, view_rows)
             end
         end
     end
-    -- Ceiling pass.
-    local above = world._shade_above
-    local cpx, cpy = cam.x, cam.y
+    -- Ceiling pass: z = cam.z+1 .. ceil_top, composited over the below
+    -- tiles with X-ray concentric transparency rings around the player.
+    --
+    -- Two compositing mechanisms, split by responsibility (BLT only honors
+    -- a cell BG on layer 0, but fg-glyph leaves alpha-blend via GL on any
+    -- layer — verified in BearLibTerminal's DrawTile / glBlendFunc):
+    --   • BG (fill): MANUAL color lerp. The ceiling's bg color is lerped
+    --     toward the below player-layer tile's bg by `alpha` and written
+    --     to layer 0's background (the only place BLT applies a bg fill).
+    --   • SYMBOLS (the two fg glyphs): BLT LAYERING. With composition ON,
+    --     a `put` ADDS a leaf without clearing; so the ceiling glyph is
+    --     added as a SECOND leaf on layer 0 (the below glyph's leaf from
+    --     the below pass is preserved) and GL alpha-blends it over the
+    --     below glyph. The ceiling fg's alpha channel carries the ring
+    --     opacity, so the roof outline fades in toward the player.
+    --
+    -- Rings (alpha = horizontal distance from the player cell):
+    --   • CORE (alpha 0)            → ceiling NOT drawn at all; the player's
+    --     own layer (at & below cam.z) shows fully.
+    --   • RING1/RING2 (0<alpha<1)   → the hybrid: lerped bg + ceiling glyph
+    --     leaf at fg alpha = ring opacity, blended over the below glyph.
+    --   • outside RING2 (alpha 1)  → fully opaque legacy ceiling: overwrite
+    --     layer 0 (composition OFF clears the below glyph) with ceiling
+    --     glyph + ceiling bg, so nothing beneath shows.
+    -- alpha depends on horizontal distance only, so it is computed once per
+    -- visible cell and shared across all ceiling layers; the below color is
+    -- resolved by scanning down from cam.z for the topmost non-Open tile
+    -- (the very pixel the below pass left on layer 0), and the ceiling
+    -- appearance is taken from the lowest (nearest) non-Open ceiling layer.
     local ceil_top = cam.z + (world.cam.z_offset or 0)
-    for z = cam.z + 1, ceil_top do
-        local h = z - cam.z
-        local entry = above[h]
-        if entry ~= nil then
-            for cy = 0, vrows - 1 do
-                local wy = oy + cy
-                if wy >= 0 and wy < H then
-                    local ddy = wy - cpy
-                    for cx = 0, cols - 1 do
-                        local wx = ox + cx
-                        if wx >= 0 and wx < W then
-                            local ddx = wx - cpx
-                            -- Skip the skylight hole: leave the current
-                            -- layer visible in a disc around the player.
-                            if ddx * ddx + ddy * ddy > CEIL_HOLE_R2 then
-                                local i = ((z * H) + wy) * W + wx
-                                local tv = types[i]
-                                local s = entry[tv]
-                                if s ~= nil then
-                                    con:put_rgb(
-                                        cx,
-                                        cy,
-                                        resolve_glyph(types, W, H, D, wx, wy, z, tv, s),
-                                        s.fg,
-                                        s.bg
-                                    )
-                                end
-                            end
-                        end
+    if ceil_top > cam.z then
+        local above = world._shade_above
+        local cpx, cpy = cam.x, cam.y
+        local camz = cam.z
+        local Open = tile.TileType.Open
+        --- Resolve the (fg, bg) the below pass left at column (wx,wy): the
+        --- shaded colors of the topmost non-Open tile at z <= cam.z, or
+        --- black if the whole column is Open air.
+        local function below_color(wx, wy)
+            for bz = camz, 0, -1 do
+                local tv = types[((bz * H) + wy) * W + wx]
+                if tv ~= Open then
+                    local s = shade[camz - bz][tv]
+                    if s ~= nil then
+                        return s.fg, s.bg
                     end
                 end
             end
+            return BLACK, BLACK
+        end
+        -- composition is toggled lazily: track the current mode so we only
+        -- call terminal_composition on transitions (CORE/outside=OFF,
+        -- rings=ON), not per cell.
+        local comp_on = false
+        for cy = 0, vrows - 1 do
+            local wy = oy + cy
+            if wy >= 0 and wy < H then
+                local ddy = wy - cpy
+                local ddy2 = ddy * ddy
+                for cx = 0, cols - 1 do
+                    local wx = ox + cx
+                    if wx >= 0 and wx < W then
+                        local ddx = wx - cpx
+                        local alpha = xray_alpha(ddx * ddx + ddy2)
+                        -- CORE ring (alpha 0): draw nothing → below shows.
+                        if alpha == 0 then
+                            goto next_ceil_cell
+                        end
+                        -- Resolve the nearest non-Open ceiling layer's
+                        -- appearance (glyph + colors). Open ceiling cells
+                        -- (nothing overhead) draw nothing.
+                        local c_ch, c_fg, c_bg
+                        for cz = camz + 1, ceil_top do
+                            local entry = above[cz - camz]
+                            if entry ~= nil then
+                                local i = ((cz * H) + wy) * W + wx
+                                local tv = types[i]
+                                local s = entry[tv]
+                                if s ~= nil then
+                                    c_ch = resolve_glyph(types, W, H, D, wx, wy, cz, tv, s)
+                                    c_fg, c_bg = s.fg, s.bg
+                                    break
+                                end
+                            end
+                        end
+                        if c_ch == nil then
+                            goto next_ceil_cell
+                        end
+                        if alpha == 1.0 then
+                            -- Fully opaque ceiling: legacy overwrite. comp
+                            -- OFF clears the below glyph leaf; ceiling glyph
+                            -- + ceiling bg replace layer 0 entirely.
+                            if comp_on then
+                                con:composition(false)
+                                comp_on = false
+                            end
+                            con:put_rgb(cx, cy, c_ch, c_fg, c_bg)
+                        else
+                            -- X-ray ring: hybrid. comp ON preserves the
+                            -- below glyph leaf and adds the ceiling glyph
+                            -- as a 2nd leaf; its fg alpha = ring opacity, so
+                            -- GL blends the two symbols. The bg is MANUALLY
+                            -- lerped (below→ceiling) and written to layer 0's
+                            -- bg (the only layer that applies a bg fill).
+                            if not comp_on then
+                                con:composition(true)
+                                comp_on = true
+                            end
+                            local bfg, bbg = below_color(wx, wy)
+                            local blended_bg = lerp_color(bbg, c_bg, alpha)
+                            local lfg = lerp_color(bfg, c_fg, alpha)
+                            local blended_fg = {
+                                r = lfg.r,
+                                g = lfg.g,
+                                b = lfg.b,
+                                a = math.floor(alpha * 255),
+                            }
+                            con:put_rgb(cx, cy, c_ch, blended_fg, blended_bg)
+                        end
+                        ::next_ceil_cell::
+                    end
+                end
+            end
+        end
+        -- Always restore composition OFF (the below pass + entities expect
+        -- the default mode next frame / in draw_entities).
+        if comp_on then
+            con:composition(false)
         end
     end
 end
@@ -442,7 +593,7 @@ end
 --- Draw every living entity that exposes a `draw(console, cam)` method.
 --- Draws entities on the camera's z layer (full brightness) AND those on
 --- layers ABOVE (z > cam.z) — the "ceiling" entities visible through the
---- skylight — EXCEPT entities within CEIL_HOLE_RADIUS of the camera (the
+--- skylight — EXCEPT entities within the X-ray CORE radius of the camera (the
 --- player) which are skipped so the hole stays clear around the player.
 --- Entities below the camera (z < cam.z) are not drawn. Scans the pooled
 --- slots [1..capacity], skipping dead ones via the `world.alive` tombstone.
@@ -464,12 +615,13 @@ function world.draw_entities(con)
             -- the peek height (ceiling entities). Above ceil_top or below
             -- the player's layer: skip.
             if ez >= cz and ez <= ceil_top then
-                -- Above-layer entities inside the skylight hole are
-                -- skipped so the hole reads clear around the player.
+                -- Above-layer entities inside the X-ray CORE disc are
+                -- skipped so the core reads clear around the player (the
+                -- roof is fully removed there; entities would floaters).
                 if ez > cz then
                     local ddx = math.floor(e.x) - cpx
                     local ddy = math.floor(e.y) - cpy
-                    if ddx * ddx + ddy * ddy <= CEIL_HOLE_R2 then
+                    if ddx * ddx + ddy * ddy <= XRAY_CORE_R2 then
                         goto next_slot
                     end
                 end

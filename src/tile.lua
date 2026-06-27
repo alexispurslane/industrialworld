@@ -181,7 +181,7 @@ local Defs = {
     [TileType.Floor] = def(
         { r = 160, g = 140, b = 100 },
         { r = 40, g = 30, b = 20 },
-        ".",
+        " ",
         Collision.Solid
     ),
     -- Wall: box-drawing glyph chosen per-cell by which neighbors are walls
