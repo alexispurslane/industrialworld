@@ -34,10 +34,10 @@
 --- `emit_collision_with`.
 
 local mixin = require("classes").mixin
-local Position = require("mixins.position")
 local Collidable = require("mixins.collidable")
 local world = require("world")
 local tile = require("tile")
+local bus = require("event")
 local log = require("log")
 local L = log.get("physics")
 
@@ -83,16 +83,54 @@ local EPS = 1e-3
 --- = slideyer. Defaults to `world.FRICTION` so existing archetypes keep
 --- the engine default; override per-instance (e.g. an ice slug vs a
 --- grippy goblin).
+---
+--- `mass` (optional, default 1.0) is this entity's MASS for impulse
+--- resolution. An applied impulse J (momentum) changes velocity by
+--- `Δv = J / mass`, so a heavy body (mass 10) barely budges when shoved
+--- while a light crate (mass 0.1) launches. Knockback emits the MOVER's
+--- momentum (`m_mover * v_mover`) as the impulse; the target's own mass
+--- then Converters it to a velocity change. Pure momentum transfer.
 ---@param x number
 ---@param y number
 ---@param z integer
 ---@param mask integer  OR of Collision.* flags.
 ---@param obeys_gravity? boolean  default false; pass true to make it fall.
 ---@param friction? number  per-second velocity retention (default world.FRICTION).
-function PhysicsObject:init(x, y, z, mask, obeys_gravity, friction)
+---@param mass? number  entity mass for impulse resolution (default 1.0).
+function PhysicsObject:init(x, y, z, mask, obeys_gravity, friction, mass)
     Collidable.init(self, x, y, z, mask)
     self.obeys_gravity = obeys_gravity or false
     self.friction = friction or FRICTION
+    self.mass = mass or 1.0
+    -- Tag this instance as a PhysicsObject so collision resolution can
+    -- cheaply identify knockable entity blockers (vs tile defs / "oob") and
+    -- emit a knockback impulse scoped to them. Set AFTER Collidable.init so
+    -- a fresh pooled slot (wiped by world.allocate) gets the flag every
+    -- recycle.
+    self.is_physics_object = true
+    -- Listen for knockback impulses scoped to THIS entity (targeted event,
+    -- mirroring the widget:click convention: a payload carrying identity so
+    -- the handler can filter without holding cross-entity references). One
+    -- subscription per entity, tracked on self._unsubs for teardown on destroy
+    -- (so a destroyed entity stops receiving shoves — no dangling refs).
+    -- Law 2: knockback is the cross-capability orchestration of collision +
+    -- the integrator, reusable across EVERY archetype, so it lives here on the
+    -- composed mixin rather than a per-archetype mixin every subclass must
+    -- remember to compose. Every PhysicsObject is knockable by default.
+    bus.subscribe(self, "knockback", function(p)
+        if p.target ~= self then
+            return
+        end
+        self:apply_impulse(p.ix or 0, p.iy or 0, p.iz or 0)
+        L:debug(
+            "[%s] knockback impulse (%.1f,%.1f,%.1f) from %s",
+            self.__name or "?",
+            p.ix or 0,
+            p.iy or 0,
+            p.iz or 0,
+            (p.source and p.source.__name) or "?"
+        )
+    end)
     L:debug(
         "[%s] init gravity=%s friction=%s at (%d,%d,%d)",
         self.__name or "?",
@@ -201,53 +239,133 @@ function PhysicsObject:surface_friction()
     return self.friction
 end
 
+--- Apply an IMPULSE (momentum J, in mass·cells/sec units) to this body.
+--- The velocity change is `Δv = J / mass` — the physically correct
+--- impulse/momentum relation. A heavy body (mass 10) gets a small Δv
+--- from the same impulse that launches a light crate (mass 0.1). This is
+--- the correct primitive for knockback, explosions, jumps, and any
+--- one-shot velocity change; unlike `accelerate` (per-frame acceleration,
+--- cleared each `update`), an impulse's effect is frame-rate-independent.
+---
+--- Mass-aware impulse lives HERE (on PhysicsObject), not on Position:
+--- mass is a dynamics property (Position is pure kinematics). The knockback
+--- event carries the mover's MOMENTUM as the impulse; the target's own
+--- `apply_impulse` converts it to Δv via its own mass — so callers stay
+--- agnostic of the target's mass.
+---@param jx number  impulse (momentum) on x.
+---@param jy number  impulse (momentum) on y.
+---@param jz number? impulse (momentum) on z.
+function PhysicsObject:apply_impulse(jx, jy, jz)
+    local m = self.mass or 1.0
+    self.vx = self.vx + jx / m
+    self.vy = self.vy + jy / m
+    self.vz = self.vz + (jz or 0) / m
+end
+
 --- Resolve the just-stepped `axis` against the tile grid + occupancy.
---- Called after `Position.step_axis` moved that axis. If the entity
---- crossed into a new cell on this axis and that cell is blocked, snap
---- the position back to the boundary of the (free) cell it came from and
---- zero that axis's velocity. Emits a collision (general + class-named)
---- for tile/entity blocks — NOT for off-map (no named blocker; matches
---- `Collidable:move`'s silent OOB reject). For the z axis with downward
---- velocity this IS the landing (replaces the old `fall()`).
+--- Move the entity along ONE axis for `dt`, integrating velocity (semi-
+--- implicit Euler) and resolving collisions via a SWEPT, cell-by-cell
+--- march from the pre-step position to the target position. Replaces the
+--- old step-then-resolve-the-destination-cell scheme, which TUNNELED: a
+--- mover faster than 1 cell/frame could jump over a 1-cell-thick wall
+--- (its destination cell landed beyond the wall, never testing the
+--- wall's cell). The swept march tests EVERY cell entered along the path
+--- and stops at the first block, so no velocity can skip a thin wall.
+---
+--- Algorithm: update v (semi-implicit), then iterate the SEQUENCE of
+--- integer cells entered from floor(old) toward floor(target), testing
+--- each via `cell_blocker` (other axes' cells held fixed at their current
+--- values). The first blocked cell rests the entity at that cell's NEAR
+--- boundary (the boundary shared with the free cell it came from) and
+--- zeroes this axis's velocity — so floor(pos) stays in the free cell.
+--- On a clear path, advance straight to `target`. Iterating INTEGER cells
+--- (not float boundaries) sidesteps the exact-on-boundary ambiguity that
+--- would otherwise infinite-loop or skip cells: we always test cell
+--- `start+dir`, `start+2*dir`, ... up to `floor(target)`, inclusive.
+---
+--- Rest convention (matches the old resolver):
+---   dir > 0: rest at `cell - EPS` (just below the blocked cell's lower
+---     boundary; floor -> the free cell behind, smooth wall rest).
+---   dir < 0: rest at `cell + 1` (the blocked cell's upper boundary, the
+---     free cell above; for the z axis with downward v this IS the landing,
+---     resting on an integer z just above the floor tile).
+---
+--- Emits `collision` (+ class-named) for tile/entity blocks, and a
+--- targeted `knockback` carrying the mover's MOMENTUM (J = m_mover * v)
+--- when the blocker is itself a PhysicsObject — the target's own mass
+--- converts J to Δv. Pure momentum transfer; shoving a body heavy vs
+--- light differs by mass, identically for every archetype (law 2).
+---
+--- `old` is captured internally and other-axis coords are snapshotted
+--- before marching, since x-before-y-before-z means later axes use the
+--- already-resolved earlier axes (e.g. the z landing uses final x,y).
 ---@param axis string  "x", "y", or "z".
----@param old number  the pre-step position on this axis.
-function PhysicsObject:resolve_axis(axis, old)
-    local new = self[axis]
-    if math.floor(new) == math.floor(old) then
-        return -- no cell crossing on this axis this frame
-    end
-    -- The cell the entity is entering on this axis. self.x/y/z currently
-    -- hold the stepped value for THIS axis and pre-step (or already-
-    -- resolved) values for the others — exactly the occupied cell.
-    local blk = self:cell_blocker(math.floor(self.x), math.floor(self.y), math.floor(self.z))
-    if blk == nil then
-        return
-    end
-    -- Snap to the boundary of the free cell we came from so floor(pos)
-    -- stays inside it. v>0: rest just below the blocked boundary (free
-    -- cell, floor -> the cell we came from) — smooth wall rest, no
-    -- backward jump. v<0: rest ON the integer cell we came from (exact
-    -- integer) — this is the LANDING, and an integer z keeps the player
-    -- drawn in the right z-window (downstream floors for cell compares).
+---@param dt number  Seconds elapsed since the last update.
+function PhysicsObject:swept_move_axis(axis, dt)
     local vname = "v" .. axis
-    if self[vname] > 0 then
-        self[axis] = math.floor(old) + 1 - EPS
-    else
-        self[axis] = math.floor(old)
+    local aname = "a" .. axis
+    -- 1. Semi-implicit Euler: update velocity first, then march with it.
+    self[vname] = self[vname] + self[aname] * dt
+    local v = self[vname]
+    if v == 0 then
+        return -- no motion this axis; nothing to sweep or resolve
     end
-    self[vname] = 0
-    if blk ~= "oob" then
-        L:debug(
-            "[%s] %s-axis blocked by %s at (%.0f,%.0f,%d)",
-            self.__name or "?",
-            axis,
-            blk.__name or "?",
-            self.x or 0,
-            self.y or 0,
-            self.z or 0
-        )
-        self:emit_collision_with(blk)
+    local old = self[axis]
+    local target = old + v * dt
+    local dir = v > 0 and 1 or -1
+    -- Other-axis cell coords are fixed during this axis's sweep.
+    local ox, oy, oz = math.floor(self.x), math.floor(self.y), math.floor(self.z)
+    -- Iterate the integer cells ENTERED: start+dir, start+2*dir, ... up to
+    -- floor(target) (the cell `target` lands in — entering it is real: to
+    -- reach pos=12.0 from below you cross the boundary at 12.0 into cell 12).
+    local start_cell = math.floor(old)
+    local last_cell = math.floor(target)
+    local cell = start_cell + dir
+    while (dir > 0 and cell <= last_cell) or (dir < 0 and cell >= last_cell) do
+        local cx, cy, cz = ox, oy, oz
+        if axis == "x" then
+            cx = cell
+        elseif axis == "y" then
+            cy = cell
+        else
+            cz = cell
+        end
+        local blk = self:cell_blocker(cx, cy, cz)
+        if blk ~= nil then
+            -- Rest at the NEAR boundary of the blocked cell (the shared
+            -- edge with the free cell we came from) and stop this axis.
+            self[axis] = (dir > 0) and (cell - EPS) or (cell + 1)
+            -- Capture pre-zero momentum for knockback (J = m_mover * v).
+            local mv = v
+            self[vname] = 0
+            if blk ~= "oob" then
+                L:debug(
+                    "[%s] %s-axis blocked by %s at (%.0f,%.0f,%d)",
+                    self.__name or "?",
+                    axis,
+                    blk.__name or "?",
+                    self.x or 0,
+                    self.y or 0,
+                    self.z or 0
+                )
+                self:emit_collision_with(blk)
+                if blk.is_physics_object then
+                    local mm = self.mass or 1.0
+                    local jx = (axis == "x") and (mm * mv) or 0
+                    local jy = (axis == "y") and (mm * mv) or 0
+                    local jz = (axis == "z") and (mm * mv) or 0
+                    bus.emit(
+                        "knockback",
+                        { target = blk, source = self, ix = jx, iy = jy, iz = jz }
+                    )
+                end
+            end
+            return -- stopped at first block; don't continue the march
+        end
+        cell = cell + dir
     end
+    -- No block in any entered cell: move freely to the integrated target.
+    self[axis] = target
 end
 
 --- Per-frame tick. The whole motion pipeline, integrator-only:
@@ -255,11 +373,15 @@ end
 ---      OVERWRITES any transient vertical input each frame — the player
 ---      only accelerates horizontally, and stairs bump `vz` directly (not
 ---      `az`), so gravity stays the sole owner of vertical acceleration.
----   2. Per axis (x, then y, then z): step the Euler integrator for one
----      axis, then resolve that axis against the grid. x-before-y-before-z
----      means the z landing uses the final horizontal position. Per-axis
----      resolution gives sliding: a diagonal into a corner zeroes only the
----      blocked axis, leaving the other to carry you along the wall.
+---   2. Per axis (x, then y, then z): SWEPT integrate + resolve via
+---      `swept_move_axis` — semi-implicit Euler update, then a cell-by-cell
+---      march from the old position to the integrated target, testing every
+---      cell entered and stopping at the first block. Swept (not
+---      destination-only) so no velocity can tunnel through a thin wall.
+---      x-before-y-before-z means the z landing uses the final horizontal
+---      position. Per-axis resolution gives sliding: a diagonal into a
+---      corner zeroes only the blocked axis, leaving the other to carry
+---      you along the wall.
 ---   3. Consume the horizontal input impulses for this frame (`ax`/`ay`
 ---      cleared — they were accumulated by `accelerate` calls since the
 ---      last frame and must not persist, or a single tap would accelerate
@@ -282,17 +404,14 @@ function PhysicsObject:update(dt)
     -- 1. Gravity baseline (vertical). az is reset fresh each frame; any
     --    vertical `accelerate` call is intentionally discarded here.
     self.az = self.obeys_gravity and -GRAVITY or 0
-    -- 2. Per-axis integrate + resolve. Capture old per axis RIGHT BEFORE
-    --    stepping it (the other axes may already be updated/resolved).
-    local ox = self.x
-    Position.step_axis(self, "x", dt)
-    self:resolve_axis("x", ox)
-    local oy = self.y
-    Position.step_axis(self, "y", dt)
-    self:resolve_axis("y", oy)
-    local oz = self.z
-    Position.step_axis(self, "z", dt)
-    self:resolve_axis("z", oz)
+    -- 2. Per-axis swept integrate + resolve. swept_move_axis does the
+    --    semi-implicit Euler step AND the cell-by-cell collision march in
+    --    one call (testing every cell entered, so fast movers can't tunnel
+    --    through thin walls). x-before-y-before-z; later axes use the
+    --    already-resolved earlier axes (e.g. the z landing uses final x,y).
+    self:swept_move_axis("x", dt)
+    self:swept_move_axis("y", dt)
+    self:swept_move_axis("z", dt)
     -- 3. Consume horizontal input impulses (they're per-frame; don't leak).
     -- Capture whether an impulse was applied to each horizontal axis THIS
     -- frame: soft-snap (step 5) must NOT fire on an axis that received

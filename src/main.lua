@@ -190,8 +190,17 @@ local function main()
     -- on the first update; the per-frame camera sync in GameScreen.draw
     -- follows it continuously. Store on world.player for that sync.
     local Player = require("player")
+    local Dummy = require("dummy")
     local player = Player(cx, cy, 1)
     world.player = player
+    -- A couple of inert dummies beside the player so you can immediately
+    -- walk into them and feel mass-aware knockback + surface friction. The
+    -- heavy `#` (mass 4) barely budges; the light `o` (mass 0.3) launches
+    -- — same player sprint, different Δv = J/mass. Spawned in the air at
+    -- z=1; gravity lands them on the floor on the first update, like the
+    -- player.
+    Dummy(cx - 3, cy - 1, 1, 4.0, "#")
+    Dummy(cx - 3, cy + 1, 1, 0.3, "o")
     -- Pre-first-frame camera snap (before the first update/draw runs).
     world.cam.x = math.floor(player.x)
     world.cam.y = math.floor(player.y)

@@ -13,7 +13,9 @@ _G.enum = require("enums")
 package.preload["industrialworld.blt"] = function()
     return { LAYER_ENTITY = 1 }
 end
-package.preload["industrialworld.blt_ffi"] = function() return {} end
+package.preload["industrialworld.blt_ffi"] = function()
+    return {}
+end
 
 local Map = require("map")
 local tile = require("tile")
@@ -51,6 +53,15 @@ function Player:init(x, y, z)
     super.init(self)
     PhysicsObject.init(self, x, y, z, Collision.Solid, true)
     Drawable.init(self, x, y, z, { r = 255, g = 255, b = 255 }, nil, "@")
+end
+
+-- A heavier body (mass 4) to exercise mass-aware impulse: same impulse ->
+-- 1/4 the Δv of the mass-1 player.
+local Crate, crate_super = _G.class("Crate", Entity):mixin(PhysicsObject, Drawable)
+function Crate:init(x, y, z, mass)
+    crate_super.init(self)
+    PhysicsObject.init(self, x, y, z, Collision.Solid, true, nil, mass or 4.0)
+    Drawable.init(self, x, y, z, { r = 200, g = 130, b = 95 }, nil, "#")
 end
 
 local FRAME = 1 / 60
@@ -144,6 +155,72 @@ do
     run(p, 120) -- 2s: gravity arcs it back down
     check("settled back near ground (z < 1.01)", p.z < 1.01, p.z)
     check("didn't fall through (z >= 0)", p.z >= 0, p.z)
+    p:destroy()
+end
+
+print("")
+----------------------------------------------------------------
+print("[5] apply_impulse: Δv = J / mass (mass-aware impulse)")
+----------------------------------------------------------------
+do
+    local p = Player(2, 2, 1)
+    run(p, 30) -- settle
+    -- mass 1.0 (default): impulse J=10 -> Δv=10. apply_impulse writes vx
+    -- directly (pre-friction), so check BEFORE the next update runs.
+    p:apply_impulse(10, 0, 0)
+    check("mass 1.0: Δv = J/m = 10", math.abs(p.vx - 10) < 0.01, p.vx)
+    local c = Crate(3, 3, 1, 4.0) -- mass 4
+    run(c, 30) -- settle
+    c:apply_impulse(10, 0, 0)
+    check("mass 4.0: Δv = J/m = 2.5", math.abs(c.vx - 2.5) < 0.01, c.vx)
+    p:destroy()
+    c:destroy()
+end
+
+----------------------------------------------------------------
+print("[6] knockback: collision transfers MOVER MOMENTUM (J = m*v)")
+----------------------------------------------------------------
+-- Mover (mass 1, v=10) hits adjacent crate (mass 4). Collision zeroes
+-- the mover's v and emits knockback impulse J = m_mover * v = 10. The
+-- crate's apply_impulse converts to Δv = J / m_crate = 10/4 = 2.5.
+do
+    local p = Player(2, 2, 1)
+    local c = Crate(3, 2, 1, 4.0) -- directly in +x path
+    run(p, 30)
+    run(c, 30) -- settle crate at (3,2,1)
+    -- Place mover just shy of the cell boundary so ONE frame crosses into
+    -- the crate's cell 3, with a known velocity (no input accel this frame
+    -- so ax=0 and friction hasn't damped vx yet at resolve time).
+    p.x = 2.9
+    p.vx = 10
+    p:update(FRAME)
+    check("mover stopped by block (vx ~ 0)", math.abs(p.vx) < 0.1, p.vx)
+    check("crate gained Δv = (m_mover*v)/m_crate = 2.5", math.abs(c.vx - 2.5) < 0.05, c.vx)
+    p:destroy()
+    c:destroy()
+end
+
+print("")
+----------------------------------------------------------------
+print("[7] swept collision: fast mover (v > 1 cell/frame) cannot tunnel through a thin wall")
+----------------------------------------------------------------
+-- Place a wall at x=4 spanning all y/z (from the map setup). A mover at
+-- x=2.x with vx=10 cells/s moves 0.167 cells/frame — calm. So set vx
+-- huge (50 cells/s = 0.83 cells/frame, multi-frame) AND start close so
+-- the integrated target clears the wall + lands beyond it in ONE frame.
+-- Old destination-only resolver would skip the wall; swept must catch it.
+do
+    local p = Player(2, 2, 1)
+    run(p, 30) -- settle on the floor
+    -- Start at x=3.5 so target = 3.5 + 50*dt... we want a velocity that
+    -- in ONE frame jumps from inside cell 3 to inside cell 6+ (past the
+    -- wall at cell 4 and the cell 5 behind it). vx=300 cells/s, dt=1/60:
+    -- displacement = 5 cells -> from 3.5 to 8.5, skipping cells 4 (wall).
+    p.vx = 300
+    p:update(FRAME)
+    check("stopped at the wall (x < 4)", p.x < 4, p.x)
+    check("didn't tunnel past (x >= 3)", p.x >= 3, p.x)
+    check("vx zeroed by block", math.abs(p.vx) < 0.1, p.vx)
     p:destroy()
 end
 
