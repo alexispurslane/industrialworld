@@ -24,6 +24,7 @@ local world = require("world")
 local Entity = require("entity")
 local PhysicsObject = require("mixins.physics_object")
 local Drawable = require("mixins.drawable")
+local Stairs = require("stairs")
 
 -- A tiny map: Solid Floor at z=0 (ground), Open air at z=1..2. A Wall at
 -- (4,2,1) blocks +x travel for the slide test.
@@ -222,6 +223,33 @@ do
     check("didn't tunnel past (x >= 3)", p.x >= 3, p.x)
     check("vx zeroed by block", math.abs(p.vx) < 0.1, p.vx)
     p:destroy()
+end
+
+print("")
+----------------------------------------------------------------
+print("[8] soft-snap into a blocked cell emits a collision (stairs shunt on a shoved heavy body)")
+----------------------------------------------------------------
+-- Regression for the "shoved body stuck on the doorstep" bug: a knock
+-- that leaves v < SOFT_SNAP_V wants to re-grid INTO the stairs cell.
+-- Old soft-snap silently arrested it there (no collision -> no shunt).
+-- Fixed soft-snap emits a collision at the blocked target cell, so the
+-- stairs' shunt handler fires and the body is teleported up.
+-- Map: floor z=0, open z=1. Place an up-stairs at (2,0,1) so a dummy
+-- shoved -x from (3,0,1) re-grids into cell 2 and should shunt to z=2.
+-- (Cell 2 is Open at z=1, so the stairs occupies it; the z=2 landing is
+-- Open air — fine: we just assert z increased, the shunt happened.)
+do
+    -- Clear the wall at (4,*,1) path is irrelevant; we use the left edge.
+    world.map.types:set(2, 0, 1, tile.TileType.Open) -- ensure stairs cell is open
+    local s = Stairs(2, 0, 1, "up")
+    local c = Crate(3, 0, 1, 4.0) -- mass 4: Δv from J=38 is 9.5 (<SOFT_SNAP_V)
+    run(c, 30) -- settle
+    -- Faithful knock: player mass 1 at cruise v=38 -> J=38. Δv = 38/4 = 9.5.
+    c:apply_impulse(-38, 0, 0) -- shove toward the stairs at -x
+    run(c, 6)
+    check("heavy body shoved into stairs shunted up (z > 1.5)", c.z > 1.5, c.z)
+    c:destroy()
+    s:destroy()
 end
 
 print(("\n%d passed, %d failed"):format(pass, fail))

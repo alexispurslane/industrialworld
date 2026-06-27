@@ -181,9 +181,11 @@ end
 --- "Direction of last motion" = sign of the axis's current velocity; a
 --- zero-velocity mid-cell entity (e.g. just spawned, or post-teleport from
 --- stairs) snaps FORWARD (ceil) to complete the step it would have taken.
---- A blocked landing cell is left where it is (don't teleport into a
---- wall); velocity is zeroed either way so the snap is terminal for that
---- axis. NOT applied to z — gravity lands z cleanly via resolve_axis, and
+--- A blocked landing cell RESTS at the near boundary AND emits a collision
+--- there (via `hit_blocker`) — so a knocked body re-gridding INTO a special
+--- tile like Stairs triggers the shunt, instead of being silently arrested
+--- on the doorstep (the bug that made heavy dummies stop 1 cell short).
+--- NOT applied to z — gravity lands z cleanly via the swept march, and
 --- soft-snapping vertical would fight jumps/stairs.
 ---@param axis string  "x" or "y".
 function PhysicsObject:soft_snap_axis(axis)
@@ -208,6 +210,17 @@ function PhysicsObject:soft_snap_axis(axis)
     local blk = self:cell_blocker(cx, cy, cz)
     if blk == nil then
         self[axis] = target
+    else
+        -- Target cell is blocked: rest at its NEAR boundary (so floor(pos)
+        -- stays in the free cell behind) and emit a collision there. This is
+        -- the fix for shoved-bodies-stuck-on-the-doorstep: a knock that
+        -- leaves v just under SOFT_SNAP_V wants to re-grid into the blocked
+        -- cell — we must trigger the collision (stairs shunt, knockback to a
+        -- crate, etc.), NOT silently arrest. Same momentum semantics as the
+        -- swept march (J = m_mover * v, captured pre-zero).
+        local dir = (v >= 0) and 1 or -1
+        self[axis] = (dir > 0) and (target - EPS) or (target + 1)
+        self:hit_blocker(axis, blk, v)
     end
     -- Terminal: zero v so the integrator doesn't re-ignite the tail next
     -- frame. (Acceleration is cleared in update's step 3.)
@@ -263,6 +276,44 @@ function PhysicsObject:apply_impulse(jx, jy, jz)
 end
 
 --- Resolve the just-stepped `axis` against the tile grid + occupancy.
+--- Emit collision + knockback for a block found while moving this axis.
+--- Shared by the swept march and the soft-snap: both discover a blocker
+--- in a cell the entity is entering and must react identically (emit the
+--- `collision`/class-named events, and if the blocker is a PhysicsObject,
+--- deliver the mover's momentum as a knockback impulse). Factored so the two
+--- paths can't drift apart (the old bug: soft-snap found a blocked snap
+--- target and SILENTLY dropped it, so a shoved body resting adjacent to a
+--- stairs never triggered the shunt).
+---
+--- `mv` is the mover's PRE-collision velocity on `axis` (captured before
+--- the caller zeroes it) — that's the momentum transferred (J = m_mover*v).
+--- Position must already be at the resting point when this is called.
+---@param axis string  "x", "y", or "z".
+---@param blk table|string  the blocker (tile def, entity, or "oob").
+---@param mv number  mover's pre-collision velocity on `axis`.
+function PhysicsObject:hit_blocker(axis, blk, mv)
+    if blk == "oob" then
+        return -- off-map: no named blocker to emit (matches Collidable:move)
+    end
+    L:debug(
+        "[%s] %s-axis blocked by %s at (%.0f,%.0f,%d)",
+        self.__name or "?",
+        axis,
+        blk.__name or "?",
+        self.x or 0,
+        self.y or 0,
+        self.z or 0
+    )
+    self:emit_collision_with(blk)
+    if blk.is_physics_object then
+        local mm = self.mass or 1.0
+        local jx = (axis == "x") and (mm * mv) or 0
+        local jy = (axis == "y") and (mm * mv) or 0
+        local jz = (axis == "z") and (mm * mv) or 0
+        bus.emit("knockback", { target = blk, source = self, ix = jx, iy = jy, iz = jz })
+    end
+end
+
 --- Move the entity along ONE axis for `dt`, integrating velocity (semi-
 --- implicit Euler) and resolving collisions via a SWEPT, cell-by-cell
 --- march from the pre-step position to the target position. Replaces the
@@ -335,31 +386,8 @@ function PhysicsObject:swept_move_axis(axis, dt)
             -- Rest at the NEAR boundary of the blocked cell (the shared
             -- edge with the free cell we came from) and stop this axis.
             self[axis] = (dir > 0) and (cell - EPS) or (cell + 1)
-            -- Capture pre-zero momentum for knockback (J = m_mover * v).
-            local mv = v
+            self:hit_blocker(axis, blk, v) -- emit collision + knockback (shared)
             self[vname] = 0
-            if blk ~= "oob" then
-                L:debug(
-                    "[%s] %s-axis blocked by %s at (%.0f,%.0f,%d)",
-                    self.__name or "?",
-                    axis,
-                    blk.__name or "?",
-                    self.x or 0,
-                    self.y or 0,
-                    self.z or 0
-                )
-                self:emit_collision_with(blk)
-                if blk.is_physics_object then
-                    local mm = self.mass or 1.0
-                    local jx = (axis == "x") and (mm * mv) or 0
-                    local jy = (axis == "y") and (mm * mv) or 0
-                    local jz = (axis == "z") and (mm * mv) or 0
-                    bus.emit(
-                        "knockback",
-                        { target = blk, source = self, ix = jx, iy = jy, iz = jz }
-                    )
-                end
-            end
             return -- stopped at first block; don't continue the march
         end
         cell = cell + dir
