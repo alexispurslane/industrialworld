@@ -48,10 +48,16 @@ function Player:init(x, y, z)
     -- (no friction override -> world.FRICTION default; the Player uses the
     -- engine-wide slideyness). NO pre-settle: gravity lands it on the first
     -- update. Sets self.z, so the explicit `self.z = z` below is unused.
-    PhysicsObject.init(self, x, y, z, Collision.Solid, true)
+    PhysicsObject.init(self, {
+        x = x,
+        y = y,
+        z = z,
+        mask = Collision.Solid,
+        obeys_gravity = true,
+    })
     -- Drawable.init sets Position (idempotent reset to the same x,y,z) +
     -- appearance (the "@" glyph).
-    Drawable.init(self, x, y, z, palette.text, nil, "@")
+    Drawable.init(self, { x = x, y = y, z = z, fg = palette.text, glyphs = "@" })
 
     -- Subscribe in init (per the event-bus convention). `bus.subscribe`
     -- tracks the unsubscribe fns on self._unsubs for teardown on destroy.

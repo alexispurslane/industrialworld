@@ -11,8 +11,10 @@ local bus = require("event")
 local Hoverable = {}
 
 function Hoverable:init()
-    assert(self.screen_x ~= nil and self.screen_y ~= nil,
-        "Hoverable.init: widget must have screen_x and screen_y")
+    assert(
+        self.screen_x ~= nil and self.screen_y ~= nil,
+        "Hoverable.init: widget must have screen_x and screen_y"
+    )
     self.hovered = false
     self._hoverable = true
     bus.subscribe(self, "widget:hover", function(p)

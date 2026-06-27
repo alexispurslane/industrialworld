@@ -9,8 +9,10 @@ local palette = require("palette")
 local ProgressFill = {}
 
 function ProgressFill:init(width, bg, fill_bg)
-    assert(self.screen_x ~= nil and self.screen_y ~= nil,
-        "ProgressFill.init: widget must have screen_x and screen_y")
+    assert(
+        self.screen_x ~= nil and self.screen_y ~= nil,
+        "ProgressFill.init: widget must have screen_x and screen_y"
+    )
     assert(type(width) == "number", "ProgressFill.init: width must be a number")
     self.bar_width = width
     self.percent = 0

@@ -162,6 +162,23 @@ new `_G.x = ...` exports; require instead.
 - Constructors: `Class(...)` and `Class:new(...)` both set the metatable
   then call `init`. `__call` dispatches through `cls.new` (not the DSL
   upvalue), so a parent's `new` override is inherited by subclasses.
+- **`init` takes a table when args are many or same-typed.** Any `init`
+  (or `M.init(self, ...)`) with **>4 args**, OR **≥3 args of the same
+  type** (e.g. three `number`s like `x,y,z`), takes a single NAMED-FIELD
+  options table as its only non-`self` param: `Position.init(self, opts)`
+  reads `opts.x`/`opts.y`/`opts.z` (all defaulted). Call sites pass the
+  literal table: `PhysicsObject.init(self, { x=x, y=y, z=z, mask=Collision.Solid, obeys_gravity=true, mass=2.0, w=2, h=2 })`.
+  The named fields disambiguate same-typed params (which number is `x`
+  vs `vx` vs `mass`?) and let call sites omit any defaulted field.
+  Inits at/under the threshold (≤4 args, <3 same-typed) stay positional —
+  `Renderable.init(self, fg, bg, glyphs)` / `Label.init(self, text, fg)`
+  / `ScreenRect.init(self, x, y, w, h)` are fine as-is. (Lua's no-parens
+  call sugar `f{...}` only applies to single-arg calls, NOT to
+  `Mixin.init(self, opts)` which is two args — so write the parens.)
+  The composed-mixin init chain forwards the SAME `opts` table down to
+  the leaves it pulls in (`PhysicsObject.init` -> `Collidable.init(self, opts)`
+  -> `Position.init(self, opts)`), since the leaves each pick out their
+  own named fields; a leaf ignores fields it doesn't own.
 - **Game entities are pooled**: `Entity.new` is overridden to call
   `world.allocate`, so `Goblin(x, y)` / `Goblin:new(x, y)` borrow a recycled
   slot from the pool (0 Lua allocs steady-state), set the alive bit, and

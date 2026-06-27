@@ -34,19 +34,58 @@ local Dummy, super = class("Dummy", Entity):mixin(PhysicsObject, Drawable)
 --- at cruise shoves it to Δv = (1.0*v_player)/2.0 = half-speed — it slides
 --- but doesn't rocket away, reading as a weighty crate. Pass a small mass
 --- (e.g. 0.3) for a light box that launches. `glyph` defaults to "#".
+--- `w,h` (optional, default 1,1) are the tile footprint dimensions. A multi-
+--- tile dummy tiles its `glyph` across every footprint cell (Renderable's
+--- glyph-list spec) and occupies all `w*h` cells for collision + occupancy.
 ---@param x number
 ---@param y number
 ---@param z integer  spawn height (gravity lands it on the Solid tile below).
 ---@param mass? number  entity mass for impulse resolution (default 2.0).
 ---@param glyph? string  appearance glyph (default "#").
-function Dummy:init(x, y, z, mass, glyph)
+---@param w? integer  footprint width in tiles (default 1).
+---@param h? integer  footprint height in tiles (default 1).
+function Dummy:init(x, y, z, mass, glyph, w, h)
     super.init(self) -- Entity no-op (law: unconditional super.init)
     -- PhysicsObject BEFORE Drawable so its collision-resolving update wins
     -- first-wins. Solid mask: collides with other Solid bodies (player,
     -- walls) so the player physically cannot walk through it and shoves it.
-    -- mass controls how much an impulse budges it (Δv = J/mass).
-    PhysicsObject.init(self, x, y, z, Collision.Solid, true, nil, mass or 2.0)
-    Drawable.init(self, x, y, z, palette.safety_yellow, nil, glyph or "#")
+    -- mass controls how much an impulse budges it (Δv = J/mass). w,h thread
+    -- through to Position via Collidable -> Position.init.
+    local fw, fh = w or 1, h or 1
+    PhysicsObject.init(self, {
+        x = x,
+        y = y,
+        z = z,
+        mask = Collision.Solid,
+        obeys_gravity = true,
+        mass = mass or 2.0,
+        w = fw,
+        h = fh,
+    })
+    -- Tile the glyph across the footprint so a 2×2 (or larger) body fills
+    -- every covered cell instead of just the origin. Renderable's glyph
+    -- list spec takes {dx,dy,ch} per cell; a 1×1 body stays a single glyph.
+    local g = glyph or "#"
+    local glyphs
+    if fw == 1 and fh == 1 then
+        glyphs = g -- single-cell fast path: a plain string
+    else
+        glyphs = {}
+        for dy = 0, fh - 1 do
+            for dx = 0, fw - 1 do
+                glyphs[#glyphs + 1] = { dx = dx, dy = dy, ch = g }
+            end
+        end
+    end
+    Drawable.init(self, {
+        x = x,
+        y = y,
+        z = z,
+        fg = palette.safety_yellow,
+        glyphs = glyphs,
+        w = fw,
+        h = fh,
+    })
 end
 
 return Dummy

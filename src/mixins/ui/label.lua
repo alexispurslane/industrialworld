@@ -8,8 +8,10 @@ local palette = require("palette")
 local Label = {}
 
 function Label:init(text, fg)
-    assert(self.screen_x ~= nil and self.screen_y ~= nil,
-        "Label.init: widget must have screen_x and screen_y")
+    assert(
+        self.screen_x ~= nil and self.screen_y ~= nil,
+        "Label.init: widget must have screen_x and screen_y"
+    )
     assert(type(text) == "string", "Label.init: text must be a string")
     self.text = text
     self.fg = fg or palette.text

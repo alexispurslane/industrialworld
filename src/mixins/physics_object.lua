@@ -71,37 +71,37 @@ local PhysicsObject = mixin({}, Collidable)
 -- compares; an integer z keeps the player drawn in the right z-window).
 local EPS = 1e-3
 
---- Initialize 3D position + collision mask (Collidable leaf) and the
---- gravity flag. The entity is NOT pre-settled on spawn: gravity pulls it
---- down on the first `update` and the resolver lands it. (Previously this
---- called a teleporting `fall()`; that path is gone — motion is
---- integrator-only now.)
+--- Initialize 3D position + collision mask (Collidable leaf) + gravity +
+--- friction + mass. Takes a NAMED-FIELD table so the ~9 params (x/y/z
+--- numbers, mask int, gravity bool, friction/mass numbers, w/h ints —
+--- many same-typed) are disambiguated at the call site, not by position.
+--- All fields optional except what the archetype needs. The entity is NOT
+--- pre-settled on spawn: gravity pulls it down on the first `update` and
+--- the resolver lands it. (Previously this called a teleporting `fall()`;
+--- that path is gone — motion is integrator-only now.)
 ---
---- `friction` (optional) is this entity's HORIZONTAL friction
---- coefficient: the per-second velocity retention applied as
---- `v *= friction^dt` each frame. Lower = grippier (snappier stop), higher
---- = slideyer. Defaults to `world.FRICTION` so existing archetypes keep
---- the engine default; override per-instance (e.g. an ice slug vs a
---- grippy goblin).
----
---- `mass` (optional, default 1.0) is this entity's MASS for impulse
---- resolution. An applied impulse J (momentum) changes velocity by
---- `Δv = J / mass`, so a heavy body (mass 10) barely budges when shoved
---- while a light crate (mass 0.1) launches. Knockback emits the MOVER's
---- momentum (`m_mover * v_mover`) as the impulse; the target's own mass
---- then Converters it to a velocity change. Pure momentum transfer.
----@param x number
----@param y number
----@param z integer
----@param mask integer  OR of Collision.* flags.
----@param obeys_gravity? boolean  default false; pass true to make it fall.
----@param friction? number  per-second velocity retention (default world.FRICTION).
----@param mass? number  entity mass for impulse resolution (default 1.0).
-function PhysicsObject:init(x, y, z, mask, obeys_gravity, friction, mass)
-    Collidable.init(self, x, y, z, mask)
-    self.obeys_gravity = obeys_gravity or false
-    self.friction = friction or FRICTION
-    self.mass = mass or 1.0
+--- Fields:
+---   x,y,z        — spawn position (Position leaf).
+---   mask         — OR of Collision.* flags (Collidable leaf; default 0).
+---   obeys_gravity — pass true to make it fall (default false).
+---   friction     — per-second velocity retention (default world.FRICTION).
+---                   Lower = grippier (snappier stop), higher = slideyer.
+---   mass         — impulse resolution mass (default 1.0). Δv = J / mass,
+---                   so a heavy body (mass 10) barely budges when shoved
+---                   while a light crate (mass 0.1) launches. Knockback
+---                   emits the MOVER's momentum (m_mover * v_mover) as the
+---                   impulse; the target's own mass converts it to Δv.
+---   w,h          — tile footprint dimensions (default 1,1 = single cell).
+---                   Threaded to Collidable.init -> Position.init; all
+---                   collision/occupancy/render paths cover the footprint.
+---   vx,vy,vz     — initial velocity (default 0; Position leaf).
+---@param opts? table  see fields above.
+function PhysicsObject:init(opts)
+    opts = opts or {}
+    Collidable.init(self, opts)
+    self.obeys_gravity = opts.obeys_gravity or false
+    self.friction = opts.friction or FRICTION
+    self.mass = opts.mass or 1.0
     -- Tag this instance as a PhysicsObject so collision resolution can
     -- cheaply identify knockable entity blockers (vs tile defs / "oob") and
     -- emit a knockback impulse scoped to them. Set AFTER Collidable.init so
@@ -136,9 +136,9 @@ function PhysicsObject:init(x, y, z, mask, obeys_gravity, friction, mass)
         self.__name or "?",
         self.obeys_gravity,
         self.friction,
-        x,
-        y,
-        z
+        opts.x or 0,
+        opts.y or 0,
+        opts.z or 0
     )
 end
 
@@ -163,6 +163,42 @@ function PhysicsObject:cell_blocker(cx, cy, cz)
     local e = world.entity_at(cx, cy, cz, self)
     if e ~= nil and self:should_collide(e) then
         return e
+    end
+    return nil
+end
+
+--- Test whether ANY cell of this entity's footprint is blocked, with the
+--- moving axis pinned to `cell_value` (the candidate origin cell along
+--- the march) and the OTHER axes fixed at the entity's CURRENT floored
+--- position. Returns the first blocker found (tile def / entity / "oob")
+--- or nil if the whole footprint is clear.
+---
+--- This generalizes the single-cell `cell_blocker` test used by the swept
+--- march and soft-snap to multi-tile bodies. The march iterates the ORIGIN
+--- cell from `floor(old)+dir` toward `floor(target)`; at each candidate
+--- origin the newly-entered cell is always the FAR edge of the footprint
+--- (`floor(x)+w-1` for +x, etc.), so the existing rest math
+--- (cell-EPS / cell+1) stays correct for any w,h — only the block-test
+--- broadens from one cell to the w×h footprint. `footprint_at` itself is
+--- pure spatial state (law 1) and lives on Position; this is the collision
+--- ORCHESTRATION over it (law 2), so it lives here on PhysicsObject.
+---@param axis string  "x", "y", or "z".
+---@param cell_value integer  candidate origin cell along `axis`.
+---@return table|string|nil blocker  first blocker found, or nil.
+function PhysicsObject:footprint_blocked_at_origin(axis, cell_value)
+    local fx, fy, fz = math.floor(self.x), math.floor(self.y), math.floor(self.z)
+    if axis == "x" then
+        fx = cell_value
+    elseif axis == "y" then
+        fy = cell_value
+    else
+        fz = cell_value
+    end
+    for _, c in ipairs(self:footprint_at(fx, fy, fz)) do
+        local blk = self:cell_blocker(c.cx, c.cy, c.cz)
+        if blk ~= nil then
+            return blk
+        end
     end
     return nil
 end
@@ -201,13 +237,9 @@ function PhysicsObject:soft_snap_axis(axis)
         return
     end
     local target = (v >= 0) and math.ceil(p) or math.floor(p)
-    local cx, cy, cz = math.floor(self.x), math.floor(self.y), math.floor(self.z)
-    if axis == "x" then
-        cx = target
-    else -- axis == "y"
-        cy = target
-    end
-    local blk = self:cell_blocker(cx, cy, cz)
+    -- Test the FULL footprint at the candidate origin `target` (not just
+    -- one cell): a multi-tile body re-gridding must not overlap a wall.
+    local blk = self:footprint_blocked_at_origin(axis, target)
     if blk == nil then
         self[axis] = target
     else
@@ -364,24 +396,22 @@ function PhysicsObject:swept_move_axis(axis, dt)
     local old = self[axis]
     local target = old + v * dt
     local dir = v > 0 and 1 or -1
-    -- Other-axis cell coords are fixed during this axis's sweep.
-    local ox, oy, oz = math.floor(self.x), math.floor(self.y), math.floor(self.z)
+    -- Other-axis cell coords are implicit (footprint_blocked_at_origin
+    -- reads self.x/y/z's current floored value), fixed during this axis's
+    -- sweep since only `axis` moves here. x-before-y-before-z means later
+    -- axes use the already-resolved earlier axes.
     -- Iterate the integer cells ENTERED: start+dir, start+2*dir, ... up to
     -- floor(target) (the cell `target` lands in — entering it is real: to
     -- reach pos=12.0 from below you cross the boundary at 12.0 into cell 12).
+    -- At each candidate ORIGIN cell, test the FULL w×h footprint (not just
+    -- one cell) so a multi-tile body can't tunnel its far edge through a
+    -- thin wall. The newly-entered cell is always the footprint's far edge,
+    -- so the rest math (cell-EPS / cell+1) stays correct for any w,h.
     local start_cell = math.floor(old)
     local last_cell = math.floor(target)
     local cell = start_cell + dir
     while (dir > 0 and cell <= last_cell) or (dir < 0 and cell >= last_cell) do
-        local cx, cy, cz = ox, oy, oz
-        if axis == "x" then
-            cx = cell
-        elseif axis == "y" then
-            cy = cell
-        else
-            cz = cell
-        end
-        local blk = self:cell_blocker(cx, cy, cz)
+        local blk = self:footprint_blocked_at_origin(axis, cell)
         if blk ~= nil then
             -- Rest at the NEAR boundary of the blocked cell (the shared
             -- edge with the free cell we came from) and stop this axis.

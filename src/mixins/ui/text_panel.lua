@@ -18,12 +18,15 @@ local palette = require("palette")
 local TextPanel = {}
 
 function TextPanel:init(event_name, max_lines)
-    assert(self.screen_x ~= nil and self.screen_y ~= nil,
-        "TextPanel.init: widget must have screen_x and screen_y")
-    assert(self.screen_w ~= nil and self.screen_h ~= nil,
-        "TextPanel.init: widget must have screen_w and screen_h (use ScreenRect)")
-    assert(type(event_name) == "string",
-        "TextPanel.init: event_name must be a string")
+    assert(
+        self.screen_x ~= nil and self.screen_y ~= nil,
+        "TextPanel.init: widget must have screen_x and screen_y"
+    )
+    assert(
+        self.screen_w ~= nil and self.screen_h ~= nil,
+        "TextPanel.init: widget must have screen_w and screen_h (use ScreenRect)"
+    )
+    assert(type(event_name) == "string", "TextPanel.init: event_name must be a string")
     self.lines = {}
     self.max_lines = max_lines or 256
     self.scroll = 1

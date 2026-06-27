@@ -10,10 +10,14 @@ local bus = require("event")
 local Clickable = {}
 
 function Clickable:init()
-    assert(self.screen_x ~= nil and self.screen_y ~= nil,
-        "Clickable.init: widget must have screen_x and screen_y")
-    assert(self._contains ~= nil,
-        "Clickable.init: widget must have a _contains method (use ScreenRect)")
+    assert(
+        self.screen_x ~= nil and self.screen_y ~= nil,
+        "Clickable.init: widget must have screen_x and screen_y"
+    )
+    assert(
+        self._contains ~= nil,
+        "Clickable.init: widget must have a _contains method (use ScreenRect)"
+    )
     self._clickable = true
     bus.subscribe(self, "widget:click", function(p)
         if p.widget ~= self then

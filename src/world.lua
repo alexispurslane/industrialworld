@@ -793,18 +793,34 @@ function world.draw_entities(con)
             local e = slots[i]
             local ez = e.z
             -- Only draw entities in the rendered z-window AND on a cell
-            -- currently in the player's FOV. Memory cells' entities stay
-            --- hidden by design.
+            --- currently in the player's FOV. Memory cells' entities stay
+            --- hidden by design. A MULTI-TILE entity draws if ANY of its
+            --- footprint cells is visible (so a 2×2 body doesn't pop based
+            --- on its origin cell); Drawable.draw then clips its glyphs to
+            --- the viewport as before.
             if math.floor(ez) >= cz and math.floor(ez) <= ceil_top then
-                local ex, ey = math.floor(e.x), math.floor(e.y)
-                local fi = ((math.floor(ez) * H) + ey) * W + ex
-                if
-                    ex >= 0
-                    and ex < W
-                    and ey >= 0
-                    and ey < H
-                    and bit.band(flags[fi], VisibleBit) ~= 0
-                then
+                local w = e.w or 1
+                local h = e.h or 1
+                local ex0, ey0 = math.floor(e.x), math.floor(e.y)
+                local z0 = math.floor(ez)
+                local any_visible = false
+                for fx = ex0, ex0 + w - 1 do
+                    if fx >= 0 and fx < W then
+                        for fy = ey0, ey0 + h - 1 do
+                            if fy >= 0 and fy < H then
+                                local fi = ((z0 * H) + fy) * W + fx
+                                if bit.band(flags[fi], VisibleBit) ~= 0 then
+                                    any_visible = true
+                                    break
+                                end
+                            end
+                        end
+                        if any_visible then
+                            break
+                        end
+                    end
+                end
+                if any_visible then
                     local d = e.draw
                     if d ~= nil then
                         d(e, con, cam)
@@ -840,76 +856,159 @@ function world.entity_at(x, y, z, ignore)
     return nil
 end
 
---- Cell index for an entity's current floor() position. Mirrors the
---- Map's z-major layout so a cell's bucket lives at the same index the
---- map uses for that (x,y,z). Local helper for occ_*.
+--- Cell indices for an entity's CURRENT footprint. Mirrors the Map's
+--- z-major layout so a cell's bucket lives at the same index the map uses
+--- for that (x,y,z). Returns the list of cells the entity's w×h footprint
+--- covers at its floored origin. Local helper for occ_*. A 1×1 entity
+--- (the default) returns a single-cell list — the historical case.
 ---@param e table
----@return integer
-local function cell_idx(e)
+---@return integer[] cells
+local function footprint_cells(e)
     local map = world.map
-    local x = math.floor(e.x or 0)
-    local y = math.floor(e.y or 0)
-    local z = math.floor(e.z)
-    return ((z * map.h) + y) * map.w + x
+    local fx = math.floor(e.x or 0)
+    local fy = math.floor(e.y or 0)
+    local fz = math.floor(e.z)
+    local w = e.w or 1
+    local h = e.h or 1
+    local cells = {}
+    for cx = fx, fx + w - 1 do
+        for cy = fy, fy + h - 1 do
+            cells[#cells + 1] = ((fz * map.h) + cy) * map.w + cx
+        end
+    end
+    return cells
 end
 
---- Remove `e` from its old occupancy bucket (if any). Idempotent: a no-op
---- if `e.__cell` is unset (entity never added, or already removed). Does
---- NOT bounds-check the old cell — a teleport past the map edge still
---- cleans up the old bucket by index. Scans the (usually 1-element)
---- bucket list for `e` and removes it; list shrinks but is not pruned.
+--- Compute a set `{[cell_index]=true}` (fast membership test) over an
+--- entity's CURRENT footprint. Local helper for occ_rehash: the diff
+--- (old cells not in the new set) is what to remove.
+---@param e table
+---@return table set  {[cell_index]=true}.
+local function footprint_set(e)
+    local set = {}
+    for _, i in ipairs(footprint_cells(e)) do
+        set[i] = true
+    end
+    return set
+end
+
+--- Remove `e` from EVERY occupancy bucket its footprint covered (if any).
+--- Idempotent: a no-op if `e.__cells` is unset (never added, or already
+--- removed). Does NOT bounds-check the old cells — a teleport past the map
+--- edge still cleans up the old buckets by index. Scans each (usually
+--- 1-element) bucket list for `e` and removes it; emptied buckets are
+--- pruned. Generalizes the old single-`__cell` path to a multi-cell body.
 ---@param e table
 function world.occ_remove(e)
-    local old = rawget(e, "__cell")
-    if old == nil then
+    local olds = rawget(e, "__cells")
+    if olds == nil then
         return
     end
-    local bucket = world.occ[old]
-    if bucket ~= nil then
-        for i = #bucket, 1, -1 do
-            if bucket[i] == e then
-                table.remove(bucket, i)
-                break
+    for _, old in ipairs(olds) do
+        local bucket = world.occ[old]
+        if bucket ~= nil then
+            for i = #bucket, 1, -1 do
+                if bucket[i] == e then
+                    table.remove(bucket, i)
+                    break
+                end
+            end
+            if #bucket == 0 then
+                world.occ[old] = nil
             end
         end
-        if #bucket == 0 then
-            world.occ[old] = nil
-        end
     end
-    e.__cell = nil
+    e.__cells = nil
 end
 
---- Re-sync `e`'s occupancy entry to its CURRENT floor() cell. Removes it
---- from the old bucket (if any) and adds it to the new one. Idempotent
---- and safe to call before an entity is tracked (allocate calls it
---- post-init, before __cell is set; occ_remove no-ops). Stale cells
---- (entity off-map) are still tracked by index so a later occ_remove
---- finds the bucket. Call from every position-changing path
---- (allocate/destroy, Collidable:move, PhysicsObject.update).
+--- Re-sync `e`'s occupancy entries to its CURRENT footprint. Removes it
+--- from old buckets whose cells it no longer covers, then adds it to any
+--- new buckets it now covers (idempotent: a body that didn't move covers
+--- the same set and the diff is empty). Safe to call before an entity is
+--- tracked (allocate calls it post-init, before __cells is set; occ_remove
+--- no-ops). Stale cells (entity partially off-map) are still tracked by
+--- index so a later occ_remove finds the buckets. Call from every
+--- position-changing path (allocate/destroy, Collidable:move,
+--- PhysicsObject.update). A multi-tile entity lists itself in EVERY
+--- footprint cell's bucket, so `world.entity_at` (one-cell lookup) finds
+--- it when ANY of its covered cells is queried — still O(1).
 ---@param e table
 function world.occ_rehash(e)
-    local new_cell = cell_idx(e)
-    local old = rawget(e, "__cell")
-    if old == new_cell then
-        return
+    local news = footprint_set(e)
+    local olds = rawget(e, "__cells")
+    if olds ~= nil then
+        -- Remove from cells no longer covered, keep cells still covered.
+        local still_covered = {}
+        for _, old in ipairs(olds) do
+            if news[old] then
+                still_covered[#still_covered + 1] = old
+            else
+                local bucket = world.occ[old]
+                if bucket ~= nil then
+                    for i = #bucket, 1, -1 do
+                        if bucket[i] == e then
+                            table.remove(bucket, i)
+                            break
+                        end
+                    end
+                    if #bucket == 0 then
+                        world.occ[old] = nil
+                    end
+                end
+            end
+        end
+        -- New cells = footprint minus what was already there.
+        local cells_to_add = {}
+        for old in pairs(news) do
+            local already = false
+            for _, c in ipairs(olds) do
+                if c == old then
+                    already = true
+                    break
+                end
+            end
+            if not already then
+                cells_to_add[#cells_to_add + 1] = old
+            end
+        end
+        -- Build the new tracked list: still-covered + newly-added.
+        local out = {}
+        for _, c in ipairs(still_covered) do
+            out[#out + 1] = c
+        end
+        for _, c in ipairs(cells_to_add) do
+            local bucket = world.occ[c]
+            if bucket == nil then
+                bucket = {}
+                world.occ[c] = bucket
+            end
+            bucket[#bucket + 1] = e
+            out[#out + 1] = c
+        end
+        e.__cells = out
+    else
+        -- First registration: add to every footprint bucket.
+        local out = {}
+        for c in pairs(news) do
+            local bucket = world.occ[c]
+            if bucket == nil then
+                bucket = {}
+                world.occ[c] = bucket
+            end
+            bucket[#bucket + 1] = e
+            out[#out + 1] = c
+        end
+        e.__cells = out
     end
-    if old ~= nil then
-        world.occ_remove(e)
-    end
-    local bucket = world.occ[new_cell]
-    if bucket == nil then
-        bucket = {}
-        world.occ[new_cell] = bucket
-    end
-    bucket[#bucket + 1] = e
-    e.__cell = new_cell
     L:trace(
-        "occ_rehash %s -> cell %d (%.0f,%.0f,%d)",
+        "occ_rehash %s -> %d cell(s) (%.0f,%.0f,%d w=%d h=%d)",
         e.__name or "?",
-        new_cell,
+        #(e.__cells or {}),
         e.x or 0,
         e.y or 0,
-        e.z or 0
+        e.z or 0,
+        e.w or 1,
+        e.h or 1
     )
 end
 

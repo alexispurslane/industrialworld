@@ -20,16 +20,15 @@ local Renderable = require("mixins.renderable")
 local Drawable = mixin({}, Position, Renderable)
 
 --- Initialize position (Position leaf) then appearance (Renderable leaf).
---- Defaults: white-on-black, single "?" glyph.
----@param x? number
----@param y? number
----@param z? number
----@param fg? table  {r=,g=,b=} default foreground.
----@param bg? table  {r=,g=,b=} default background.
----@param glyphs? string|integer|table  Glyph spec (see renderable.lua).
-function Drawable:init(x, y, z, fg, bg, glyphs)
-    Position.init(self, x, y, z)
-    Renderable.init(self, fg, bg, glyphs)
+--- Takes a NAMED-FIELD table: appearance fields (fg/bg/glyphs) plus the
+--- spatial fields that flow through to Position.init (x,y,z,w,h). Defaults:
+--- white-on-black, single "?" glyph. `w,h` (default 1,1) declare the tile
+--- footprint so a multi-tile drawable can be sized at construction.
+---@param opts? table  {x=,y=,z=,fg=,bg=,glyphs=,w=,h=,vx=,vy=,vz=} (all optional).
+function Drawable:init(opts)
+    opts = opts or {}
+    Position.init(self, opts)
+    Renderable.init(self, opts.fg, opts.bg, opts.glyphs)
 end
 
 --- Render this entity in camera space onto `console`. Translates world

@@ -37,10 +37,14 @@ local Anchor = {}
 --- @param side string "top"|"bottom"|"left"|"right"
 --- @param alignment string "start"|"center"|"end"
 function Anchor:init(target, side, alignment)
-    assert(side == "top" or side == "bottom" or side == "left" or side == "right",
-        "Anchor.init: side must be top/bottom/left/right")
-    assert(alignment == "start" or alignment == "center" or alignment == "end",
-        "Anchor.init: alignment must be start/center/end")
+    assert(
+        side == "top" or side == "bottom" or side == "left" or side == "right",
+        "Anchor.init: side must be top/bottom/left/right"
+    )
+    assert(
+        alignment == "start" or alignment == "center" or alignment == "end",
+        "Anchor.init: alignment must be start/center/end"
+    )
     self.anchor_target = target
     self.anchor_side = side
     self.anchor_alignment = alignment

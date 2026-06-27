@@ -38,14 +38,15 @@ local L = log.get("collidable")
 
 local Collidable = mixin({}, Position)
 
---- Initialize 3D position (Position leaf) then the collision mask.
----@param x number
----@param y number
----@param z number
----@param mask integer  OR of Collision.* flags (0 = collides with nothing).
-function Collidable:init(x, y, z, mask)
-    Position.init(self, x, y, z)
-    self.mask = mask or 0
+--- Initialize 3D position (Position leaf) then the collision mask. Takes a
+--- NAMED-FIELD table: `mask` is what Collidable adds; the rest (x,y,z,w,h)
+--- flow through to Position.init. `w,h` (optional, default 1,1) are the
+--- tile footprint dimensions so an archetype can declare a multi-tile body.
+---@param opts? table  {x=,y=,z=,mask=,w=,h=,vx=,vy=,vz=} (`mask` default 0).
+function Collidable:init(opts)
+    opts = opts or {}
+    Position.init(self, opts)
+    self.mask = opts.mask or 0
 end
 
 --- True iff `self` and `other` share any collision category bit.
@@ -108,38 +109,45 @@ function Collidable:move(dx, dy, dz)
     local nx = math.floor(self.x) + dx
     local ny = math.floor(self.y) + dy
     local nz = self.z + (dz or 0)
-    if not map:in_bounds(nx, ny, nz) then
-        return false -- off-map: blocked (no tile to name, so no emit)
-    end
-    local tv = map.types:index(nx, ny, nz)
-    local cb = tile.defs[tv]
-    if cb ~= nil and self:should_collide(cb) then
-        L:debug(
-            "[%s] step %+d,%+d,%+d blocked by tile %s",
-            self.__name or "?",
-            dx,
-            dy,
-            dz or 0,
-            cb.__name or "?"
-        )
-        self:emit_collision_with(cb)
-        return false
-    end
-    -- Entity-vs-entity: block if a collidable entity (e.g. a Stairs)
-    -- occupies the destination cell. `world.entity_at` is an O(1)
-    -- spatial-hash lookup now (was an O(n) pool scan).
-    local e = world.entity_at(nx, ny, nz, self)
-    if e ~= nil and self:should_collide(e) then
-        L:debug(
-            "[%s] step %+d,%+d,%+d blocked by entity %s",
-            self.__name or "?",
-            dx,
-            dy,
-            dz or 0,
-            e.__name or "?"
-        )
-        self:emit_collision_with(e)
-        return false
+    -- Test the FULL footprint at the destination origin (nx, ny, nz), not
+    -- just the single destination cell: a multi-tile body shunted by stairs
+    -- must not overlap a wall. Any blocked cell aborts the step at the first
+    -- blocker found (emit a collision so stairs/knockback reactions fire).
+    for _, c in ipairs(self:footprint_at(nx, ny, nz)) do
+        if not map:in_bounds(c.cx, c.cy, c.cz) then
+            return false -- off-map: blocked (no tile to name, no emit)
+        end
+        local tv = map.types:index(c.cx, c.cy, c.cz)
+        local cb = tile.defs[tv]
+        if cb ~= nil and self:should_collide(cb) then
+            L:debug(
+                "[%s] step %+d,%+d,%+d blocked by tile %s",
+                self.__name or "?",
+                dx,
+                dy,
+                dz or 0,
+                cb.__name or "?"
+            )
+            self:emit_collision_with(cb)
+            return false
+        end
+        -- Entity-vs-entity: block if a collidable entity (e.g. a Stairs)
+        -- occupies a footprint cell. `world.entity_at` is an O(1)
+        -- spatial-hash lookup now (was an O(n) pool scan). A multi-tile
+        -- mover checks each of its footprint cells.
+        local e = world.entity_at(c.cx, c.cy, c.cz, self)
+        if e ~= nil and self:should_collide(e) then
+            L:debug(
+                "[%s] step %+d,%+d,%+d blocked by entity %s",
+                self.__name or "?",
+                dx,
+                dy,
+                dz or 0,
+                e.__name or "?"
+            )
+            self:emit_collision_with(e)
+            return false
+        end
     end
     Position.move(self, dx, dy, dz)
     world.occ_rehash(self)

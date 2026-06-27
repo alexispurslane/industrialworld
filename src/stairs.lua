@@ -62,8 +62,8 @@ function Stairs:init(x, y, z, direction)
     super.init(self) -- Entity no-op
     local d = DIR[direction] or DIR.up
     self.direction = direction or "up"
-    Collidable.init(self, x, y, z, ALL_BITS)
-    Drawable.init(self, x, y, z, d.fg, nil, d.glyph)
+    Collidable.init(self, { x = x, y = y, z = z, mask = ALL_BITS })
+    Drawable.init(self, { x = x, y = y, z = z, fg = d.fg, glyphs = d.glyph })
     L:debug("placed %s-stairs at (%d,%d,%d)", self.direction, x, y, z)
 
     -- React when ANY mover collides with THIS stairs. The general

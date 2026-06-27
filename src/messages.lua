@@ -26,12 +26,7 @@ function messages.init(con)
     if panel ~= nil then
         return
     end
-    panel = MessageLog(
-        con,
-        PANEL_H - 1,
-        "message",
-        MAX
-    )
+    panel = MessageLog(con, PANEL_H - 1, "message", MAX)
 end
 
 --- Render the message log (rule line + visible lines).

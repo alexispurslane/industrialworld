@@ -196,10 +196,12 @@ local function main()
     -- A couple of inert dummies beside the player so you can immediately
     -- walk into them and feel mass-aware knockback + surface friction. The
     -- heavy `#` (mass 4) barely budges; the light `o` (mass 0.3) launches
-    -- — same player sprint, different Δv = J/mass. Spawned in the air at
-    -- z=1; gravity lands them on the floor on the first update, like the
-    -- player.
-    Dummy(cx - 3, cy - 1, 1, 4.0, "#")
+    -- — same player sprint, different Δv = J/mass. The heavy one is a 2×2
+    -- body (occupies 4 cells, tiles its `#` glyph across them) to exercise
+    -- the multi-tile footprint path; the light one stays 1×1. Spawned in
+    -- the air at z=1; gravity lands them on the floor on the first update,
+    -- like the player.
+    Dummy(cx - 3, cy - 1, 1, 4.0, "#", 2, 2)
     Dummy(cx - 3, cy + 1, 1, 0.3, "o")
     -- Pre-first-frame camera snap (before the first update/draw runs).
     world.cam.x = math.floor(player.x)
