@@ -1,9 +1,11 @@
 --- Collidable mixin (composed: Position + collision).
 ---
 --- A positionable entity whose `move` is collision-guarded. Composes
---- `Position` (spatial state + the plain `move` it overrides) and carries
---- a collision `mask` (bitflags). `move` checks the destination tile
---- before stepping; if blocked it is a no-op and returns false.
+--- `Position` (3D spatial state + the plain `move` it overrides) and
+--- carries a collision `mask` (bitflags). `move(dx, dy, dz)` checks the
+--- destination tile at (nx, ny, nz=self.z+dz) before stepping; if blocked
+--- it is a no-op and returns false. `dz` defaults to 0 so 2D callers
+--- (move(dx,dy)) keep working.
 ---
 --- This is law 2's signature pattern: the "movement blocked by solid
 --- terrain" behavior exists ONLY at the intersection of Position +
@@ -34,12 +36,13 @@ local Collision = require("collision")
 
 local Collidable = mixin({}, Position)
 
---- Initialize position (Position leaf) then the collision mask.
+--- Initialize 3D position (Position leaf) then the collision mask.
 ---@param x number
 ---@param y number
+---@param z number
 ---@param mask integer  OR of Collision.* flags (0 = collides with nothing).
-function Collidable:init(x, y, mask)
-    Position.init(self, x, y)
+function Collidable:init(x, y, z, mask)
+    Position.init(self, x, y, z)
     self.mask = mask or 0
 end
 
@@ -72,43 +75,48 @@ function Collidable:emit_collision_with(other)
     )
 end
 
---- Step by (dx, dy) unless the destination tile is solid. Reads the tile
---- type at the destination cell (cheap cdata lookup via the map), maps it
---- to its fixed collidable through `tile.defs`, and tests masks. A
+--- Step by (dx, dy, dz) unless the destination tile is solid or occupied.
+--- Reads the tile type at the destination cell ((nx,ny,nz) where
+--- nz=self.z+(dz or 0)) via the map's SoA cdata, maps it to its fixed
+--- collidable through `tile.defs`, and tests masks. Then checks the
+--- spatial hash for a collidable entity at the destination cell. A
 --- blocked step is a no-op (position unchanged), emits a collision event,
---- and returns false.
+--- and returns false. On success, `Position.move` updates position and
+--- `world.occ_rehash` updates the occupancy hash.
 ---
 --- `world` and `tile` are required lazily (inside the function) so this
 --- module can load before `world` is constructed (entity subclasses are
 --- defined at require time, before main runs).
 ---@param dx number
 ---@param dy number
+---@param dz? number  default 0.
 ---@return boolean moved  true if the step was taken, false if blocked.
-function Collidable:move(dx, dy)
+function Collidable:move(dx, dy, dz)
     local world = require("world")
     local tile = require("tile")
     local map = world.map
     local nx = math.floor(self.x) + dx
     local ny = math.floor(self.y) + dy
-    local z = self.z or 0
-    if not map:in_bounds(nx, ny, z) then
+    local nz = self.z + (dz or 0)
+    if not map:in_bounds(nx, ny, nz) then
         return false -- off-map: blocked (no tile to name, so no emit)
     end
-    local tv = map.types:index(nx, ny, z)
+    local tv = map.types:index(nx, ny, nz)
     local cb = tile.defs[tv]
     if cb ~= nil and self:should_collide(cb) then
         self:emit_collision_with(cb)
         return false
     end
-    -- Entity-vs-entity: also block if a collidable entity occupies the
-    -- destination cell (e.g. a Stairs). `world.entity_at` scans the pool;
-    -- scan is O(n) but runs once per step (turn-based, fine).
-    local e = world.entity_at(nx, ny, z, self)
+    -- Entity-vs-entity: block if a collidable entity (e.g. a Stairs)
+    -- occupies the destination cell. `world.entity_at` is an O(1)
+    -- spatial-hash lookup now (was an O(n) pool scan).
+    local e = world.entity_at(nx, ny, nz, self)
     if e ~= nil and self:should_collide(e) then
         self:emit_collision_with(e)
         return false
     end
-    Position.move(self, dx, dy)
+    Position.move(self, dx, dy, dz)
+    world.occ_rehash(self)
     return true
 end
 

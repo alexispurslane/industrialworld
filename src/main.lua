@@ -148,13 +148,14 @@ local function main()
     world.draw_entities(con)
     ctx:present(con)
 
-    -- Keybinds: raw vk -> semantic emit. The loop emits BOTH a general
-    -- `keypress:<vk>` event (for any mixin/system that wants raw keys)
-    -- AND the bound semantic action (move/peek/quit). Mixins listen
-    -- for the semantics they care about; the general keypress channel is
-    -- the escape hatch for ad-hoc key reactions. Explicit per-key emits
-    -- (few, fixed binds) instead of a packed table — avoids unpack and
-    -- keeps the arg types visible to the linter.
+    -- Keybinds (raw vk -> semantic emit). The real-time loop below drains
+    -- pending keypresses each frame and emits BOTH a general
+    -- `keypress:<vk>` event (for any mixin/system that wants raw keys) AND
+    -- the bound semantic action (move/peek/quit). Mixins listen for the
+    -- semantics they care about; the general keypress channel is the escape
+    -- hatch for ad-hoc key reactions. Explicit per-key emits (few, fixed
+    -- binds) instead of a packed table — avoids unpack and keeps arg types
+    -- visible to the linter.
     local key = tcod.key
     local quit = false
     bus.subscribe(world, "quit", function()
@@ -169,35 +170,82 @@ local function main()
         world.cam.z = p.z
     end)
 
+    -- Real-time frame pump. Each iteration:
+    --   1. Drain ALL pending input events (nonblocking; check_for_event
+    --      returns 0 when the queue is empty). Keybinds emit semantic
+    --      actions (move/peek/quit) into the bus — input stays event-
+    --      driven, but the sim no longer BLOCKS on input.
+    --   2. Compute dt via os.clock() (seconds since last frame).
+    --   3. world.update(dt) ticks every living entity's :update(dt) —
+    --      PhysicsObject runs euler+fall, so gravity re-settles every
+    --      frame whether the entity moved discretely or via velocity.
+    --   4. Render + present.
+    --   5. Sleep to cap the framerate (~60 FPS) so we don't spin the CPU.
+    -- The old blocking wait_for_event is gone; the sim now advances in real
+    -- time independent of keypresses, which is what unblocks NPCs, DoTs,
+    -- animations, etc. Keybinds still emit BOTH the semantic action AND the
+    -- raw keypress:<vk> channel, as before.
+    local last = os.clock()
+    local FRAME_TIME = 1 / 60 -- target 60 FPS
     while not quit do
-        local ev, kev = tcod.wait_for_event(tcod.event_key_press, false)
-        if ev == 0 then
-            goto continue
+        -- 1. Drain pending input (nonblocking).
+        while true do
+            local ev, kev = tcod.check_for_event(tcod.event_key_press)
+            if ev == 0 then
+                break
+            end
+            local vk = tonumber(kev.vk)
+            -- General raw-key channel: keypress:<vk>.
+            bus.emit(("keypress:%d"):format(vk))
+            -- Semantic channel: the bound action, if any.
+            if vk == key.right then
+                bus.emit("move", 1, 0)
+            elseif vk == key.left then
+                bus.emit("move", -1, 0)
+            elseif vk == key.up then
+                bus.emit("move", 0, -1)
+            elseif vk == key.down then
+                bus.emit("move", 0, 1)
+            elseif vk == key.pageup then
+                world.peek(1)
+            elseif vk == key.pagedown then
+                world.peek(-1)
+            elseif vk == key.escape then
+                bus.emit("quit")
+            end
         end
-        local vk = tonumber(kev.vk)
-        -- General raw-key channel: keypress:<vk>.
-        bus.emit(("keypress:%d"):format(vk))
-        -- Semantic channel: the bound action, if any.
-        if vk == key.right then
-            bus.emit("move", 1, 0)
-        elseif vk == key.left then
-            bus.emit("move", -1, 0)
-        elseif vk == key.up then
-            bus.emit("move", 0, -1)
-        elseif vk == key.down then
-            bus.emit("move", 0, 1)
-        elseif vk == key.pageup then
-            world.peek(1)
-        elseif vk == key.pagedown then
-            world.peek(-1)
-        elseif vk == key.escape then
-            bus.emit("quit")
-        end
+
+        -- 2. dt since last frame.
+        local now = os.clock()
+        local dt = now - last
+        last = now
+
+        -- 3. Advance the simulation.
+        world.update(dt)
+
+        -- 4. Render + present.
         con:clear()
         world.render_map(con)
         world.draw_entities(con)
         ctx:present(con)
-        ::continue::
+
+        -- 5. Cap framerate. vsync (set on context creation) already
+        --    synchronizes ctx:present() to the display refresh (~60Hz),
+        --    so this is belt-and-suspenders. Try luasocket's sleep if
+        --    available in the host; if not (embedded host may not ship
+        --    it), rely on vsync alone and skip — no crash. Resolved once.
+        local elapsed = os.clock() - now
+        local remaining = FRAME_TIME - elapsed
+        if remaining > 0 and _G._sleep_fn ~= nil then
+            _G._sleep_fn(remaining)
+        elseif remaining > 0 and _G._sleep_tried == nil then
+            _G._sleep_tried = true
+            local ok, sock = pcall(require, "socket")
+            if ok and type(sock.sleep) == "function" then
+                _G._sleep_fn = sock.sleep
+                sock.sleep(remaining)
+            end
+        end
     end
 
     con:shutdown()

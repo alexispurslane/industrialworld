@@ -46,9 +46,9 @@ function Player:init(x, y, z)
     -- + gravity flag + settles on spawn (fall). Sets self.z, so the
     -- explicit `self.z = z` below is no longer needed.
     PhysicsObject.init(self, x, y, z, Collision.Solid, true)
-    -- Drawable.init sets Position (idempotent reset to the same x,y) +
+    -- Drawable.init sets Position (idempotent reset to the same x,y,z) +
     -- appearance (the "@" glyph).
-    Drawable.init(self, x, y, { r = 255, g = 255, b = 255 }, nil, "@")
+    Drawable.init(self, x, y, z, { r = 255, g = 255, b = 255 }, nil, "@")
 
     -- Subscribe in init (per the event-bus convention). `bus.subscribe`
     -- tracks the unsubscribe fns on self._unsubs for teardown on destroy.

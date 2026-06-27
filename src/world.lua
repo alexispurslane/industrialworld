@@ -48,6 +48,14 @@ local world = {
     alive = ffi.new("uint8_t[?]", INITIAL_ENTITY_CAP), -- 0=dead, 1=alive (0-based)
     map = Map(2000, 2000, 10), -- the game world's Map (schema-driven SoA; zero-filled)
     cam = { x = 1000, y = 1000, z = 9, z_offset = 0 }, -- camera center cell, z layer, + peek offset
+    -- Spatial hash: cell_idx -> set of living entities at that cell.
+    -- Cell idx mirrors the Map's z-major layout (idx = ((z*H+y)*W+x)).
+    -- A cell holds a list (usually 0 or 1 entity); entity_at is O(1)
+    -- instead of the O(capacity) pool scan it replaced. Maintained in
+    -- allocate (post-init), destroy (pre-teardown), and every move/update
+    -- path that changes an entity's cell (Collidable:move, PhysicsObject
+    -- fall/update) via occ_rehash.
+    occ = {},
     _shade = {}, -- depth-shaded appearance cache (rebuilt on cam.z change)
     _shade_max_depth = -1,
 }
@@ -94,6 +102,8 @@ end
 --- Allocate a game entity into the first dead slot (growing the pool if
 --- full), reusing the pooled table there. Returns the entity (a Lua table
 --- dispatching through `cls`). Called by Entity.new; spawn via `Cls(...)`.
+--- After init, registers the entity in the spatial hash at its post-init
+--- cell (init may have moved it, e.g. PhysicsObject falls on spawn).
 ---@param cls table   The class (e.g. Goblin).
 ---@param ... any      Args forwarded to cls.init.
 ---@return table entity
@@ -111,13 +121,15 @@ function world.allocate(cls, ...)
     end
     e.__slot = i -- engine infra (not mixin state); O(1) destroy lookup
     world.alive[i - 1] = 1
+    world.occ_rehash(e) -- register at post-init cell (init may have moved it)
     return e
 end
 
 --- Mark `e`'s slot dead so it can be recycled by a later allocate. Calls
 --- the entity's mixin teardown chain FIRST (so subscribers unsubscribe
---- before the table is wiped/reused). Does NOT free the Lua table (the
---- pool retains it for recycling).
+--- before the table is wiped/reused), removes it from the spatial hash,
+--- then marks the slot dead. Does NOT free the Lua table (the pool retains
+--- it for recycling).
 ---@param e table  An entity previously returned by allocate.
 function world.destroy(e)
     -- Mixin teardown: any mixin that subscribed in its init appended an
@@ -131,6 +143,7 @@ function world.destroy(e)
         end
         e._unsubs = nil
     end
+    world.occ_remove(e)
     local i = rawget(e, "__slot")
     if i ~= nil then
         world.alive[i - 1] = 0
@@ -418,7 +431,7 @@ function world.draw_entities(con)
     for i = 1, n do
         if alive[i - 1] == 1 then
             local e = slots[i]
-            local ez = e.z or 0
+            local ez = e.z
             -- Draw entities on the player's layer (full) and above, up to
             -- the peek height (ceiling entities). Above ceil_top or below
             -- the player's layer: skip.
@@ -443,31 +456,115 @@ function world.draw_entities(con)
 end
 
 --- Find the first living entity (other than `ignore`) occupying cell
---- (x,y,z), or nil. A linear scan of the pool — O(capacity), fine for
---- turn-based moves (one step per keypress). Used by entity-vs-entity
---- collision (Collidable:move) to detect e.g. a Stairs at the destination.
+--- (x,y,z), or nil. An O(1) spatial-hash lookup (was an O(capacity)\n--- pool scan). Used by entity-vs-entity collision (Collidable:move) to\n--- detect e.g. a Stairs at the destination.
 ---@param x integer
 ---@param y integer
 ---@param z integer
 ---@param ignore? table  Skip this entity (the mover itself).
 ---@return table|nil
 function world.entity_at(x, y, z, ignore)
-    local a = world.alive
-    local slots = world.slots
-    for i = 1, world.capacity do
-        if a[i - 1] == 1 then
-            local e = slots[i]
-            if
-                e ~= ignore
-                and math.floor(e.x) == x
-                and math.floor(e.y) == y
-                and (e.z or 0) == z
-            then
-                return e
-            end
+    local map = world.map
+    if x < 0 or x >= map.w or y < 0 or y >= map.h or z < 0 or z >= map.d then
+        return nil
+    end
+    local i = ((z * map.h) + y) * map.w + x
+    local bucket = world.occ[i]
+    if bucket == nil then
+        return nil
+    end
+    for _, e in ipairs(bucket) do
+        if e ~= ignore then
+            return e
         end
     end
     return nil
+end
+
+--- Cell index for an entity's current floor() position. Mirrors the
+--- Map's z-major layout so a cell's bucket lives at the same index the
+--- map uses for that (x,y,z). Local helper for occ_*.
+---@param e table
+---@return integer
+local function cell_idx(e)
+    local map = world.map
+    local x = math.floor(e.x or 0)
+    local y = math.floor(e.y or 0)
+    local z = math.floor(e.z)
+    return ((z * map.h) + y) * map.w + x
+end
+
+--- Remove `e` from its old occupancy bucket (if any). Idempotent: a no-op
+--- if `e.__cell` is unset (entity never added, or already removed). Does
+--- NOT bounds-check the old cell — a teleport past the map edge still
+--- cleans up the old bucket by index. Scans the (usually 1-element)
+--- bucket list for `e` and removes it; list shrinks but is not pruned.
+---@param e table
+function world.occ_remove(e)
+    local old = rawget(e, "__cell")
+    if old == nil then
+        return
+    end
+    local bucket = world.occ[old]
+    if bucket ~= nil then
+        for i = #bucket, 1, -1 do
+            if bucket[i] == e then
+                table.remove(bucket, i)
+                break
+            end
+        end
+        if #bucket == 0 then
+            world.occ[old] = nil
+        end
+    end
+    e.__cell = nil
+end
+
+--- Re-sync `e`'s occupancy entry to its CURRENT floor() cell. Removes it
+--- from the old bucket (if any) and adds it to the new one. Idempotent
+--- and safe to call before an entity is tracked (init-time fall calls it
+--- during allocate, before __cell is set; occ_remove no-ops). Stale cells
+--- (entity off-map) are still tracked by index so a later occ_remove
+--- finds the bucket. Call from every position-changing path
+--- (allocate/destroy, Collidable:move, PhysicsObject fall/update).
+---@param e table
+function world.occ_rehash(e)
+    local new_cell = cell_idx(e)
+    local old = rawget(e, "__cell")
+    if old == new_cell then
+        return
+    end
+    if old ~= nil then
+        world.occ_remove(e)
+    end
+    local bucket = world.occ[new_cell]
+    if bucket == nil then
+        bucket = {}
+        world.occ[new_cell] = bucket
+    end
+    bucket[#bucket + 1] = e
+    e.__cell = new_cell
+end
+
+--- Advance the simulation by `dt` seconds: tick every living entity's
+--- `:update(dt)` hook. Skips dead slots via the alive tombstone. Mixins
+--- override update (PhysicsObject runs euler+fall; future AI/Health tick
+--- here). Entities without an update method (the no-op inherited from
+--- Entity) still iterate but do nothing — cheap. Called once per frame
+--- by the real-time loop in main.lua.
+---@param dt number  Seconds elapsed since the last update.
+function world.update(dt)
+    local a = world.alive
+    local slots = world.slots
+    local n = world.capacity
+    for i = 1, n do
+        if a[i - 1] == 1 then
+            local e = slots[i]
+            local u = e.update
+            if u ~= nil then
+                u(e, dt)
+            end
+        end
+    end
 end
 
 return world

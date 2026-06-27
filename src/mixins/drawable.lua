@@ -23,11 +23,12 @@ local Drawable = mixin({}, Position, Renderable)
 --- Defaults: white-on-black, single "?" glyph.
 ---@param x? number
 ---@param y? number
+---@param z? number
 ---@param fg? table  {r=,g=,b=} default foreground.
 ---@param bg? table  {r=,g=,b=} default background.
 ---@param glyphs? string|integer|table  Glyph spec (see renderable.lua).
-function Drawable:init(x, y, fg, bg, glyphs)
-    Position.init(self, x, y)
+function Drawable:init(x, y, z, fg, bg, glyphs)
+    Position.init(self, x, y, z)
     Renderable.init(self, fg, bg, glyphs)
 end
 
