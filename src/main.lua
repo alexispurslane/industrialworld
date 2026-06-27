@@ -31,6 +31,8 @@ local log = require("log")
 local palette = require("palette")
 local game_state = require("game_state")
 local messages = require("messages")
+local ui = require("ui")
+local screens = require("screens")
 local L = log.get("main")
 
 -- Log floor: override via the IW_LOG env var ("trace"/"debug"/"info"/...).
@@ -66,6 +68,7 @@ local function main()
         "window.cellsize=16x16",
         "font: vendor/fonts/MonosquareExtended.ttf, size=24x24, mode=monochrome, align=center, use-box-drawing=false, use-block-elements=false, hinting=normal",
         "0xE000: vendor/fonts/DejaVuSans.ttf, size=16x16, align=center, hinting=normal",
+        "input.filter=[keyboard, mouse]",
     }, "; ")
     if not blt.set(cfg) then
         log.get("main"):error("failed to configure BearLibTerminal fonts")
@@ -207,28 +210,21 @@ local function main()
         world.cam.z = p.z
     end)
 
-    -- Menu/pause overlay helpers. Menu clears to the soot palette color
-    -- and shows a simple title screen; pause overlays a banner on top of
-    -- the game view.
-    local function centered_x(str)
-        return math.floor((cols - #str) / 2)
-    end
+    -- Screen setup. main.lua switches screens in response to game-state
+    -- changes; each screen owns its own draw/update/teardown logic.
+    local current_screen = screens.MenuScreen(con)
+    local pause_overlay = screens.PauseOverlay(con)
 
-    local function draw_menu()
-        con:set_default_bg(palette.soot)
-        con:clear()
-        local title = "INDUSTRIALWORLD"
-        con:print_serif(centered_x(title), math.floor(rows / 2) - 2, title, palette.text)
-        local start_line = "[ENTER] Start"
-        con:print_serif(centered_x(start_line), math.floor(rows / 2) + 1, start_line, palette.text)
-        local quit_line = "[ESC] Quit"
-        con:print_serif(centered_x(quit_line), math.floor(rows / 2) + 3, quit_line, palette.text)
-    end
-
-    local function draw_pause()
-        local msg = "PAUSED  [P] Resume  [ESC] Quit"
-        con:print_serif(centered_x(msg), math.floor(rows / 2), msg, palette.safety_yellow)
-    end
+    bus.subscribe(world, "state_changed", function(_old, new)
+        if new == game_state.Mode.Menu then
+            current_screen:destroy()
+            current_screen = screens.MenuScreen(con)
+        elseif new == game_state.Mode.Playing then
+            current_screen:destroy()
+            current_screen = screens.GameScreen(con)
+        end
+        -- Paused keeps the gameplay screen; only the overlay changes.
+    end)
 
     -- Real-time frame pump. Each iteration:
     --   1. Drain ALL pending input events (nonblocking). Input is routed
@@ -238,6 +234,10 @@ local function main()
     --   3. Advance the simulation only while Playing.
     --   4. Render the menu, the game, or the pause overlay as appropriate.
     --   5. Sleep to cap the framerate (~60 FPS) so we don't spin the CPU.
+    -- Last cell reported by a mouse-move event, for deduplicating hover
+    -- emits when the input queue contains multiple movement events.
+    local last_mx, last_my = -1, -1
+
     local last = os.clock()
     local FRAME_TIME = 1 / 60 -- target 60 FPS
     while not quit do
@@ -251,6 +251,21 @@ local function main()
             L:debug("key vk=%d", vk)
             -- General raw-key channel: keypress:<vk>.
             bus.emit(("keypress:%d"):format(vk))
+
+            -- Mouse events. Clicks and hovers carry {x, y} data so UI
+            -- widgets can test containment without knowing the console.
+            if vk == key.tk_mouse_move then
+                local mx = blt.state(blt.tk_mouse_x)
+                local my = blt.state(blt.tk_mouse_y)
+                if mx ~= last_mx or my ~= last_my then
+                    bus.emit("mouse_hover", { x = mx, y = my })
+                    last_mx, last_my = mx, my
+                end
+            elseif vk >= key.tk_mouse_left and vk <= key.tk_mouse_middle then
+                local mx = blt.state(blt.tk_mouse_x)
+                local my = blt.state(blt.tk_mouse_y)
+                bus.emit("mouse_click", { x = mx, y = my, button = vk })
+            end
 
             -- State-bound input.
             if game_state.is(game_state.Mode.Menu) then
@@ -297,17 +312,9 @@ local function main()
         end
 
         -- 4. Render + present.
-        if game_state.is(game_state.Mode.Menu) then
-            draw_menu()
-        else
-            con:clear()
-            world.render_map(con, view_rows)
-            world.draw_entities(con)
-            messages.draw(con)
-        end
-
+        current_screen:draw()
         if game_state.is(game_state.Mode.Paused) then
-            draw_pause()
+            pause_overlay:draw()
         end
 
         con:refresh()

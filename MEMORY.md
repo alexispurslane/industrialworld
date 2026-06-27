@@ -7,6 +7,9 @@ so the agent can pick up context across sessions.
 ## Key Decisions
 
 - we should use manual compositing with the colors on the lower layers for the bg, if what you say is true that BLT doesn't layer bgs; but use BLT's layering to composite the two *symbols* together
+- for the pause and main screens, let's use the serif font, not the tile font.
+- since we now have a UI layer, we should add clicks and hovers (with {x,y} data) to the event bus, and make a function that will blit in a button, which just consists of rendering some text, and setting up an event...
+- let's create a progress bar ui thing, that renders filled boxes (so, we should use bg color), and sets up a listener for an event based on the id provided to it that tells it what percent to fill to next, and also...
 
 ## Gotchas & Errors
 
@@ -17,5 +20,6 @@ so the agent can pick up context across sessions.
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/industrialworld/src/world.lua (6 reads) — Found it — that's a bug in my CORE handling. When `alpha == 0`, the code falls i
-- /Users/alexispurslane/Development/industrialworld/vendor/bearlibterminal/Terminal/Source/Terminal.cpp (5 reads) — The compositing happens around line 2146–2199. Let me read it.
+- /Users/alexispurslane/Development/industrialworld/src/industrialworld/blt.lua (5 reads) — I found the aesthetic. Now I'll read the current rendering/color files and a cou
+- /Users/alexispurslane/Development/industrialworld/src/main.lua (13 reads)
+- /Users/alexispurslane/Development/industrialworld/src/world.lua (4 reads)

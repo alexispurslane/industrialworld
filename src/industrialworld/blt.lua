@@ -364,6 +364,16 @@ return {
     off = 0,
     on = 1,
 
+    -- mouse
+    tk_mouse_left = 0x80,
+    tk_mouse_right = 0x81,
+    tk_mouse_middle = 0x82,
+    tk_mouse_move = 0x85,
+    tk_mouse_scroll = 0x86,
+    tk_mouse_x = 0x87,
+    tk_mouse_y = 0x88,
+    tk_mouse_clicks = 0x8C,
+
     -- state codes
     tk_width = 0xC0,
     tk_height = 0xC1,
