@@ -27,6 +27,7 @@ local PhysicsObject = require("mixins.physics_object")
 local Collision = require("collision")
 local Drawable = require("mixins.drawable")
 local Renderable = require("mixins.renderable")
+local palette = require("palette")
 local bus = require("event")
 local log = require("log")
 local L = log.get("player")
@@ -48,7 +49,7 @@ function Player:init(x, y, z)
     PhysicsObject.init(self, x, y, z, Collision.Solid, true)
     -- Drawable.init sets Position (idempotent reset to the same x,y,z) +
     -- appearance (the "@" glyph).
-    Drawable.init(self, x, y, z, { r = 255, g = 255, b = 255 }, nil, "@")
+    Drawable.init(self, x, y, z, palette.text, nil, "@")
 
     -- Subscribe in init (per the event-bus convention). `bus.subscribe`
     -- tracks the unsubscribe fns on self._unsubs for teardown on destroy.

@@ -34,6 +34,7 @@ local Entity = require("entity")
 local Collidable = require("mixins.collidable")
 local Collision = require("collision")
 local Drawable = require("mixins.drawable")
+local palette = require("palette")
 local bus = require("event")
 local log = require("log")
 local L = log.get("stairs")
@@ -45,11 +46,11 @@ local L = log.get("stairs")
 -- categories too.
 local ALL_BITS = 0xFFFFFFFF
 
--- Per-direction config: (z delta, glyph, color). Up = z+1 ("<", yellow);
--- down = z-1 (">", cyan). Anything else defaults to up.
+-- Per-direction config: (z delta, glyph, color). Up = z+1 ("<", safety
+-- yellow); down = z-1 (">", cyan). Anything else defaults to up.
 local DIR = {
-    up = { dz = 1, glyph = "<", fg = { r = 230, g = 200, b = 60 } },
-    down = { dz = -1, glyph = ">", fg = { r = 80, g = 200, b = 220 } },
+    up = { dz = 1, glyph = "<", fg = palette.safety_yellow },
+    down = { dz = -1, glyph = ">", fg = palette.cyan },
 }
 
 local Stairs, super = class("Stairs", Entity):mixin(Collidable, Drawable)

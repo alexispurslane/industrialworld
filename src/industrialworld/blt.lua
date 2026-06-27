@@ -14,7 +14,8 @@
 --- Fonts: BLT loads TrueType at runtime. We configure TWO tilesets at
 --- disjoint Unicode ranges in init():
 ---   • DejaVuSansMono at the base codepoints  → crisp AA monospace tiles
----   • DejaVuSerif   at 0xE000+ (Private Use) → serif text for messages
+---   • DejaVuSans    at 0xE000+ (Private Use) → sans-serif text for
+--     messages and UI overlays
 --- A put(x,y,code) resolves whichever tileset owns that codepoint.
 ---
 --- Color: BLT color_t is uint32 ARGB (0xAARRGGBB). We pack in Lua.
@@ -22,6 +23,12 @@
 local ffi = require("ffi")
 local bit = require("bit")
 local C = require("industrialworld.blt_ffi")
+
+-- Layer constants (also exported below). Internal methods reference these
+-- locals so they are available at definition time.
+local LAYER_MAP = 0
+local LAYER_ENTITY = 1
+local LAYER_UI = 2
 
 ----------------------------------------------------------------------------------------------------
 -- Color
@@ -173,7 +180,8 @@ end
 --- loaded at offset 0xE000, full cellsize). We remap the ASCII codepoint
 --- into the Private Use Area so BLT's global codespace resolves the glyph
 --- to the message font instead of the base mono tileset. Non-ASCII
---- codepoints (< 0x20 or >= 0x7F) fall through unchanged.
+--- codepoints (< 0x20 or >= 0x7F) fall through unchanged. Drawn on the
+--- UI layer so text overlays the map.
 ---@param x integer
 ---@param y integer
 ---@param ch integer ASCII codepoint (0x20–0x7E)
@@ -183,7 +191,8 @@ function Console:put_serif(x, y, ch, fg, bg)
     if ch >= 0x20 and ch < 0x7F then
         ch = 0xE000 + ch
     end
-    self:put_rgb(x, y, ch, fg, bg)
+    -- Draw on the UI layer so message text overlays the map.
+    self:put_rgb(x, y, ch, fg, bg, LAYER_UI)
 end
 
 --- Put a codepoint at (x,y) with an fg/bg color pair (put_char shape).
@@ -208,6 +217,40 @@ function Console:print(x, y, str)
     local out_w = ffi.new("int[1]")
     local out_h = ffi.new("int[1]")
     C.terminal_print_ext8(x, y, 0, 0, 0, str, out_w, out_h) -- 0 = TK_ALIGN_DEFAULT
+end
+
+--- Print a string at (x,y) using the sans-serif message tileset
+--- (DejaVuSans loaded at 0xE000). Each printable ASCII byte is remapped into the
+--- Private Use Area so BLT resolves it to the serif glyph. Draws on the
+--- UI layer (2) so it overlays the map and entity layers without
+--- destroying the layer-0 background.
+---@param x integer
+---@param y integer
+---@param str string
+---@param fg? table|integer
+---@param bg? table|integer
+function Console:print_serif(x, y, str, fg, bg)
+    C.terminal_layer(LAYER_UI)
+    C.terminal_color(to_color(fg or self._fg))
+    C.terminal_bkcolor(to_color(bg or self._bg))
+    local out = {}
+    for i = 1, #str do
+        local b = str:byte(i)
+        if b >= 0x20 and b < 0x7F then
+            -- Map ASCII into the PUA range 0xE000+ and encode as UTF-8
+            -- (3-byte form: U+E0xx -> 0xEE 0x8x 0xxx).
+            local cp = 0xE000 + b
+            local byte1 = 0xE0 + bit.rshift(cp, 12)
+            local byte2 = 0x80 + bit.band(bit.rshift(cp, 6), 0x3F)
+            local byte3 = 0x80 + bit.band(cp, 0x3F)
+            out[#out + 1] = string.char(byte1, byte2, byte3)
+        else
+            out[#out + 1] = string.char(b)
+        end
+    end
+    local out_w = ffi.new("int[1]")
+    local out_h = ffi.new("int[1]")
+    C.terminal_print_ext8(x, y, 0, 0, 0, table.concat(out), out_w, out_h)
 end
 
 --- Flip the scene to the screen.
@@ -289,9 +332,11 @@ return {
     end,
 
     -- BLT layer conventions: 0 = map tiles (bg+fg, opaque), 1 = entities
-    -- (fg-only, transparent — the tile bg on layer 0 shows through).
-    LAYER_MAP = 0,
-    LAYER_ENTITY = 1,
+    -- (fg-only, transparent — the tile bg on layer 0 shows through),
+    -- 2 = UI text/overlays (fg-only, drawn last).
+    LAYER_MAP = LAYER_MAP,
+    LAYER_ENTITY = LAYER_ENTITY,
+    LAYER_UI = LAYER_UI,
 
     -- color
     colors = colors,
@@ -342,6 +387,7 @@ return {
     tk_pagedown = 0x4E,
     tk_home = 0x4A,
     tk_end = 0x4D,
+    tk_p = 0x13,
     tk_close = 0xE0,
     tk_key_released = 0x100,
 }

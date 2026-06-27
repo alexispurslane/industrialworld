@@ -59,6 +59,7 @@ local mixin = require("classes").mixin
 local Renderable = require("mixins.renderable")
 local Collidable = require("mixins.collidable")
 local Collision = require("collision")
+local palette = require("palette")
 
 local TileMixin = mixin({}, Renderable, Collidable)
 
@@ -177,25 +178,25 @@ end
 local Defs = {
     -- Open: a much darker filled background (a space on a dark cell fills
     -- the whole cell with the bg, so it reads as solid-black "void").
-    [TileType.Open] = def({ r = 10, g = 10, b = 14 }, { r = 10, g = 10, b = 14 }, " "),
+    [TileType.Open] = def(palette.soot, palette.soot, " "),
     [TileType.Floor] = def(
-        { r = 160, g = 140, b = 100 },
-        { r = 40, g = 30, b = 20 },
+        palette.floor_fg,
+        palette.floor_bg,
         " ",
         Collision.Solid
     ),
     -- Wall: box-drawing glyph chosen per-cell by which neighbors are walls
     -- (connectivity mask → BOX_4 entry; e.g. N+E = "└"). The bg is a filled
-    -- gray; the fg is the box glyph (darker so it shows).
+    -- weathered concrete; the fg is the box glyph (darker slate so it shows).
     [TileType.Wall] = def_box(
-        { r = 70, g = 70, b = 80 },
-        { r = 120, g = 120, b = 130 },
+        palette.wall_fg,
+        palette.wall_bg,
         Collision.Solid,
         { connect = { TileType.Wall }, glyphs = BOX_4, default = "·" }
     ),
-    [TileType.StairsDown] = def({ r = 180, g = 180, b = 180 }, { r = 30, g = 30, b = 30 }, ">"),
-    [TileType.StairsUp] = def({ r = 180, g = 180, b = 180 }, { r = 30, g = 30, b = 30 }, "<"),
-    [TileType.Ramp] = def({ r = 160, g = 140, b = 100 }, { r = 60, g = 50, b = 35 }, "^"),
+    [TileType.StairsDown] = def(palette.stairs, palette.iron, ">"),
+    [TileType.StairsUp] = def(palette.safety_yellow, palette.iron, "<"),
+    [TileType.Ramp] = def(palette.floor_fg, palette.mud, "^"),
 }
 
 -- Tag each tile def with its type name (TileType reverse lookup) so the

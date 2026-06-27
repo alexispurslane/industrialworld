@@ -31,6 +31,7 @@
 
 local bus = require("event")
 local log = require("log")
+local palette = require("palette")
 local L = log.get("messages")
 
 -- Panel geometry. PANEL_H rows reserved at the bottom; the topmost is
@@ -51,11 +52,11 @@ local DIM_PER_ROW = 0.14
 local MIN_BRIGHT = 0.42
 
 -- Panel + rule colors.
-local PANEL_BG = { r = 12, g = 14, b = 20 }
-local RULE_FG = { r = 70, g = 75, b = 90 }
-local DEFAULT_FG = { r = 220, g = 220, b = 225 }
+local PANEL_BG = palette.soot
+local RULE_FG = palette.graphite
+local DEFAULT_FG = palette.text
 -- Color dimmed entries lerp toward (matches the panel bg-ish dark).
-local DIM_TARGET = { r = 24, g = 26, b = 34 }
+local DIM_TARGET = palette.panel_dim
 
 local messages = {
     PANEL_H = PANEL_H,

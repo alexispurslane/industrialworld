@@ -28,6 +28,8 @@ local Entity = require("entity")
 local world = require("world")
 local bus = require("event")
 local log = require("log")
+local palette = require("palette")
+local game_state = require("game_state")
 local messages = require("messages")
 local L = log.get("main")
 
@@ -48,8 +50,9 @@ local function main()
     --   • DejaVuSansMono at offset 0        → AA monospace tiles (ASCII,
     --     box-drawing, block elements). use-box-drawing/block-elements
     --     tell BLT to use the font's own glyphs for those ranges.
-    --   • DejaVuSerif   at offset 0xE000     → serif glyphs for the
-    --     messages panel (drawn via PUA codepoints, see messages.lua).
+    --   • DejaVuSans    at offset 0xE000     → sans-serif glyphs for
+    --     the messages panel and UI overlays (drawn via PUA codepoints,
+    --     see messages.lua and blt.lua print_serif).
     -- Both share one global codespace; a cell's codepoint resolves to
     -- whichever tileset owns that range. cellsize is fixed square so
     -- tile centering math is unchanged from the libtcod model.
@@ -88,7 +91,7 @@ local function main()
     -- (systems narrate via `bus.emit("message", text, fg)`) and seed it
     -- with a welcome banner so the panel isn't empty on first frame.
     messages.init()
-    bus.emit("message", "Welcome to industrialworld.", { r = 220, g = 220, b = 225 })
+    bus.emit("message", "Welcome to industrialworld.", palette.text)
 
     -- Simple test map for the gravity model (FLOOR IS SOLID ground; walk in
     -- the OPEN AIR cell above it; gravity rests when the cell below is Solid):
@@ -204,21 +207,37 @@ local function main()
         world.cam.z = p.z
     end)
 
+    -- Menu/pause overlay helpers. Menu clears to the soot palette color
+    -- and shows a simple title screen; pause overlays a banner on top of
+    -- the game view.
+    local function centered_x(str)
+        return math.floor((cols - #str) / 2)
+    end
+
+    local function draw_menu()
+        con:set_default_bg(palette.soot)
+        con:clear()
+        local title = "INDUSTRIALWORLD"
+        con:print_serif(centered_x(title), math.floor(rows / 2) - 2, title, palette.text)
+        local start_line = "[ENTER] Start"
+        con:print_serif(centered_x(start_line), math.floor(rows / 2) + 1, start_line, palette.text)
+        local quit_line = "[ESC] Quit"
+        con:print_serif(centered_x(quit_line), math.floor(rows / 2) + 3, quit_line, palette.text)
+    end
+
+    local function draw_pause()
+        local msg = "PAUSED  [P] Resume  [ESC] Quit"
+        con:print_serif(centered_x(msg), math.floor(rows / 2), msg, palette.safety_yellow)
+    end
+
     -- Real-time frame pump. Each iteration:
-    --   1. Drain ALL pending input events (nonblocking; blt.has_input()
-    --      returns false when the queue is empty). Keybinds emit semantic
-    --      actions (move/peek/quit) into the bus — input stays event-
-    --      driven, but the sim no longer BLOCKS on input.
+    --   1. Drain ALL pending input events (nonblocking). Input is routed
+    --      through the centralized game_state: the menu, pause, and playing
+    --      screens each bind their own keys.
     --   2. Compute dt via os.clock() (seconds since last frame).
-    --   3. world.update(dt) ticks every living entity's :update(dt) —
-    --      PhysicsObject runs euler+fall, so gravity re-settles every
-    --      frame whether the entity moved discretely or via velocity.
-    --   4. Render + present.
+    --   3. Advance the simulation only while Playing.
+    --   4. Render the menu, the game, or the pause overlay as appropriate.
     --   5. Sleep to cap the framerate (~60 FPS) so we don't spin the CPU.
-    --   The old blocking wait_for_event is gone; the sim now advances in real
-    --   time independent of keypresses, which is what unblocks NPCs, DoTs,
-    --   animations, etc. Keybinds still emit BOTH the semantic action AND the
-    --   raw keypress:<vk> channel, as before.
     local last = os.clock()
     local FRAME_TIME = 1 / 60 -- target 60 FPS
     while not quit do
@@ -232,21 +251,38 @@ local function main()
             L:debug("key vk=%d", vk)
             -- General raw-key channel: keypress:<vk>.
             bus.emit(("keypress:%d"):format(vk))
-            -- Semantic channel: the bound action, if any.
-            if vk == key.tk_right then
-                bus.emit("move", 1, 0)
-            elseif vk == key.tk_left then
-                bus.emit("move", -1, 0)
-            elseif vk == key.tk_up then
-                bus.emit("move", 0, -1)
-            elseif vk == key.tk_down then
-                bus.emit("move", 0, 1)
-            elseif vk == key.tk_pageup then
-                world.peek(1)
-            elseif vk == key.tk_pagedown then
-                world.peek(-1)
-            elseif vk == key.tk_escape then
-                bus.emit("quit")
+
+            -- State-bound input.
+            if game_state.is(game_state.Mode.Menu) then
+                if vk == key.tk_return then
+                    game_state.set(game_state.Mode.Playing)
+                elseif vk == key.tk_escape then
+                    bus.emit("quit")
+                end
+            elseif game_state.is(game_state.Mode.Paused) then
+                if vk == key.tk_p then
+                    game_state.set(game_state.Mode.Playing)
+                elseif vk == key.tk_escape then
+                    bus.emit("quit")
+                end
+            elseif game_state.is(game_state.Mode.Playing) then
+                if vk == key.tk_p then
+                    game_state.set(game_state.Mode.Paused)
+                elseif vk == key.tk_escape then
+                    bus.emit("quit")
+                elseif vk == key.tk_right then
+                    bus.emit("move", 1, 0)
+                elseif vk == key.tk_left then
+                    bus.emit("move", -1, 0)
+                elseif vk == key.tk_up then
+                    bus.emit("move", 0, -1)
+                elseif vk == key.tk_down then
+                    bus.emit("move", 0, 1)
+                elseif vk == key.tk_pageup then
+                    world.peek(1)
+                elseif vk == key.tk_pagedown then
+                    world.peek(-1)
+                end
             end
         end
 
@@ -255,14 +291,25 @@ local function main()
         local dt = now - last
         last = now
 
-        -- 3. Advance the simulation.
-        world.update(dt)
+        -- 3. Advance the simulation only while Playing.
+        if game_state.is(game_state.Mode.Playing) then
+            world.update(dt)
+        end
 
         -- 4. Render + present.
-        con:clear()
-        world.render_map(con, view_rows)
-        world.draw_entities(con)
-        messages.draw(con)
+        if game_state.is(game_state.Mode.Menu) then
+            draw_menu()
+        else
+            con:clear()
+            world.render_map(con, view_rows)
+            world.draw_entities(con)
+            messages.draw(con)
+        end
+
+        if game_state.is(game_state.Mode.Paused) then
+            draw_pause()
+        end
+
         con:refresh()
 
         -- 5. Cap framerate. BLT doesn't expose vsync control, so we sleep

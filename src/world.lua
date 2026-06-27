@@ -20,6 +20,7 @@ local ffi = require("ffi")
 local Map = require("map")
 local tile = require("tile")
 local blt = require("industrialworld.blt")
+local palette = require("palette")
 local log = require("log")
 local L = log.get("world")
 
@@ -67,7 +68,7 @@ local XRAY_ALPHA_RING2 = 0.40
 -- Pure-black stand-in for the "below" color of a column that is Open air
 -- all the way down (nothing was drawn on layer 0 there beyond con:clear's
 -- default black bg); used by the ceiling compositing lerp.
-local BLACK = { r = 0, g = 0, b = 0 }
+local BLACK = palette.black
 
 --- Pick the ceiling opacity (0..1) for a cell at squared horizontal
 --- distance `r2` from the player cell. 0 = fully removed (core), 1 =
