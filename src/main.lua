@@ -70,7 +70,7 @@ local function main()
         "window.cellsize=16x16",
         "font: vendor/fonts/MonosquareExtended.ttf, size=24x24, mode=monochrome, align=center, use-box-drawing=false, use-block-elements=false, hinting=normal",
         "0xE000: vendor/fonts/DejaVuSans.ttf, size=16x16, align=center, hinting=normal",
-        "input.filter=[keyboard, mouse]",
+        "input.filter=[keyboard+, mouse+]",
     }, "; ")
     if not blt.set(cfg) then
         log.get("main"):error("failed to configure BearLibTerminal fonts")
@@ -185,16 +185,17 @@ local function main()
         end
     end
 
-    -- Spawn the player in the z=1 air at the room center. Player:init ->
-    -- PhysicsObject.init -> fall(): cell below z=0 is Floor Solid -> rests
-    -- at z=1. Free to walk the z=1 interior, bounded by the wall outline.
+    -- Spawn the player in the z=1 air at the room center. Gravity (via
+    -- PhysicsObject's per-axis resolver) lands it on the Solid floor below
+    -- on the first update; the per-frame camera sync in GameScreen.draw
+    -- follows it continuously. Store on world.player for that sync.
     local Player = require("player")
     local player = Player(cx, cy, 1)
-    -- The init-time fall isn't bus-tracked (the camera subscribes to "moved"
-    -- below, after this), so snap the camera to the player's post-fall pos.
+    world.player = player
+    -- Pre-first-frame camera snap (before the first update/draw runs).
     world.cam.x = math.floor(player.x)
     world.cam.y = math.floor(player.y)
-    world.cam.z = player.z
+    world.cam.z = math.floor(player.z)
 
     -- Render the map and present.
     con:clear()
@@ -221,14 +222,11 @@ local function main()
         quit = true
     end)
 
-    -- Camera follows the player: subscribe to `moved` (emitted by Player
-    -- after it acts) and refocus cam.x/y/z onto the player.
-    bus.subscribe(world, "moved", function(p)
-        L:debug("camera follow -> (%.0f,%.0f,%d)", p.x, p.y, p.z)
-        world.cam.x = math.floor(p.x)
-        world.cam.y = math.floor(p.y)
-        world.cam.z = p.z
-    end)
+    -- Camera follows the player EVERY FRAME: GameScreen.draw syncs
+    -- `world.cam` to `world.player` (floor x/y, z) before rendering, since
+    -- the player's motion is now continuous (impulse + Euler integrator,
+    -- no discrete "moved" event). The pre-first-frame snap above covers the
+    -- gap before the first draw.
 
     -- Screen setup. main.lua switches screens in response to game-state
     -- changes; each screen owns its own draw/update/teardown logic.
@@ -259,6 +257,23 @@ local function main()
     local last_mx, last_my = -1, -1
     local hover_widget = nil
 
+    -- Held arrow-key set (polled movement model). BLT delivers a keyDown on
+    -- every OS key-repeat too, but with an initial ~250ms gap and ~30ms
+    -- repeats — far too coarse to accumulate velocity while holding. So we
+    -- track held STATE here (press adds, release removes) and emit ONE
+    -- aggregated `move` per frame while Playing, decoupling hold-feel from
+    -- OS-repeat jitter. A tap = 1-2 frames of impulse (soft-snap completes
+    -- a single cell); a hold = impulse every frame -> continuous accel ->
+    -- the graceful slide-to-stop the integrator + soft-snap produce.
+    -- Keyed by base scan code (the code with TK_KEY_RELEASED stripped).
+    local held = {}
+    local function is_released(vk)
+        return bit.band(vk, key.tk_key_released) ~= 0
+    end
+    local function base_code(vk)
+        return bit.band(vk, 0xFF) -- strip TK_KEY_RELEASED (0x100) bit
+    end
+
     local last = os.clock()
     local FRAME_TIME = 1 / 60 -- target 60 FPS
     while not quit do
@@ -270,8 +285,13 @@ local function main()
                 break
             end
             L:debug("key vk=%d", vk)
-            -- General raw-key channel: keypress:<vk>.
-            bus.emit(("keypress:%d"):format(vk))
+            local base = base_code(vk) -- scan code with RELEASED bit stripped
+            local released = is_released(vk)
+            -- General raw-key channel: keypress:<vk> (press only — releases
+            -- carry the TK_KEY_RELEASED bit and are tracked via `held`).
+            if not released then
+                bus.emit(("keypress:%d"):format(vk))
+            end
 
             -- Window events: close button and resize.
             if vk == key.tk_close then
@@ -299,11 +319,17 @@ local function main()
                     local current_hover = world.widget_topmost({ x = mx, y = my }, "_hoverable")
                     if current_hover ~= hover_widget then
                         if hover_widget then
-                            bus.emit("widget:hover", { widget = hover_widget, x = mx, y = my, state = false })
+                            bus.emit(
+                                "widget:hover",
+                                { widget = hover_widget, x = mx, y = my, state = false }
+                            )
                         end
                         hover_widget = current_hover
                         if hover_widget then
-                            bus.emit("widget:hover", { widget = hover_widget, x = mx, y = my, state = true })
+                            bus.emit(
+                                "widget:hover",
+                                { widget = hover_widget, x = mx, y = my, state = true }
+                            )
                         end
                     end
 
@@ -338,18 +364,27 @@ local function main()
                     game_state.set(game_state.Mode.Paused)
                 elseif vk == key.tk_escape then
                     bus.emit("quit")
-                elseif vk == key.tk_right then
-                    bus.emit("move", 1, 0)
-                elseif vk == key.tk_left then
-                    bus.emit("move", -1, 0)
-                elseif vk == key.tk_up then
-                    bus.emit("move", 0, -1)
-                elseif vk == key.tk_down then
-                    bus.emit("move", 0, 1)
                 elseif vk == key.tk_pageup then
                     world.peek(1)
                 elseif vk == key.tk_pagedown then
                     world.peek(-1)
+                end
+            end
+
+            -- Arrow-key HELD-STATE tracking (universal: runs in any state so
+            -- a held key released during pause still clears). The per-frame
+            -- `move` emit (aggregated from this set) fires below, only while
+            -- Playing. Press (no RELEASED bit) adds; release removes.
+            if
+                base == key.tk_right
+                or base == key.tk_left
+                or base == key.tk_up
+                or base == key.tk_down
+            then
+                if released then
+                    held[base] = nil
+                else
+                    held[base] = true
                 end
             end
         end
@@ -361,6 +396,17 @@ local function main()
 
         -- 3. Advance the simulation only while Playing.
         if game_state.is(game_state.Mode.Playing) then
+            -- Per-frame movement from the held arrow-key set (polled
+            -- model): one aggregated `move` emit per frame while a key is
+            -- held -> the player's `move` handler applies one accel impulse,
+            -- every frame -> continuous accel -> real sliding on hold.
+            -- Opposite keys cancel; no held keys -> no emit (no impulse,
+            -- friction + soft-snap bring the player to rest).
+            local dx = (held[key.tk_right] and 1 or 0) - (held[key.tk_left] and 1 or 0)
+            local dy = (held[key.tk_down] and 1 or 0) - (held[key.tk_up] and 1 or 0)
+            if dx ~= 0 or dy ~= 0 then
+                bus.emit("move", dx, dy)
+            end
             world.update(dt)
         end
 

@@ -58,10 +58,11 @@ local TileFlags = enum.flags("Walkable", "Opaque", "Explored", "Visible")
 local mixin = require("classes").mixin
 local Renderable = require("mixins.renderable")
 local Collidable = require("mixins.collidable")
+local Surface = require("mixins.surface")
 local Collision = require("collision")
 local palette = require("palette")
 
-local TileMixin = mixin({}, Renderable, Collidable)
+local TileMixin = mixin({}, Renderable, Collidable, Surface)
 
 --- Decode the first UTF-8 codepoint of `s` to an integer. Local copy of
 --- Renderable's (not exported there) so `def_box` can convert the box-
@@ -95,9 +96,14 @@ end
 ---@param glyph string|integer
 ---@param mask? integer  OR of Collision.* (nil/0 = collides with nothing).
 ---@return table
-local function def(fg, bg, glyph, mask)
+--- `friction?` (number) is this surface's per-second velocity retention
+--- (default Surface.DEFAULT — the pre-Surface engine value). Pass a
+--- smaller value for a grippier surface (mud), larger for a slideyer one
+--- (ice). PhysicsObject reads this from the supporting tile each frame.
+local function def(fg, bg, glyph, mask, friction)
     local t = setmetatable({}, TileMixin)
     Renderable.init(t, fg, bg, glyph)
+    Surface.init(t, friction)
     t.mask = mask or 0
     return t
 end
@@ -141,14 +147,14 @@ local BOX_4 = {
 ---@param fg table
 ---@param bg table
 ---@param mask integer  Collision.* bit(s).
----@param spec table  `{ connect={TileType,...}, glyphs={...}, default?="·", z? = true }`.
+---@param spec table  `{ connect={TileType,...}, glyphs={...}, default?="·", z? = true, friction? = number }`.
 ---@return table
 local function def_box(fg, bg, mask, spec)
     -- The base glyph passed to Renderable.init: the spec's default (mask-0
     -- entry, or spec.default). It's the fallback when the renderer's
     -- mask-lookup misses and the def's own .glyphs[1] is consulted.
     local default_ch = spec.default or spec.glyphs[0] or "·"
-    local t = def(fg, bg, default_ch, mask)
+    local t = def(fg, bg, default_ch, mask, spec.friction)
     -- Precompute the link set (types this tile connects to) as a fast
     -- {[tv]=true} table, and convert the glyphs string table to integer
     -- codepoints — both once, at load; the hot loop reads them as-is.
@@ -179,12 +185,7 @@ local Defs = {
     -- Open: a much darker filled background (a space on a dark cell fills
     -- the whole cell with the bg, so it reads as solid-black "void").
     [TileType.Open] = def(palette.soot, palette.soot, " "),
-    [TileType.Floor] = def(
-        palette.floor_fg,
-        palette.floor_bg,
-        " ",
-        Collision.Solid
-    ),
+    [TileType.Floor] = def(palette.floor_fg, palette.floor_bg, " ", Collision.Solid),
     -- Wall: box-drawing glyph chosen per-cell by which neighbors are walls
     -- (connectivity mask → BOX_4 entry; e.g. N+E = "└"). The bg is a filled
     -- weathered concrete; the fg is the box glyph (darker slate so it shows).

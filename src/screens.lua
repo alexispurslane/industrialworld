@@ -100,6 +100,20 @@ function screens.GameScreen(con)
             -- immediately (the console shim's size is updated on resize).
             local view_rows = con:height() - messages.PANEL_H
             world.cam.view_rows = view_rows
+            -- Camera follows the player every frame (motion is continuous
+            -- via the integrator; there's no discrete "moved" event
+            -- anymore). Sync cam x/y/z from world.player BEFORE fov/render
+            -- so this frame paints the right viewport + visibility set.
+            -- cam coords are INTEGER CELLS (math.floor): the integrator
+            -- rests the player at sub-cell precision (e.g. z=1.001 just
+            -- above the floor), but cam.z is used as an array index into
+            -- the shade cache / FOV voxel grid, which must stay integral.
+            local p = world.player
+            if p ~= nil then
+                world.cam.x = math.floor(p.x)
+                world.cam.y = math.floor(p.y)
+                world.cam.z = math.floor(p.z)
+            end
             -- Recompute the player's FOV (sets TileFlags.Visible; ORs
             -- Explored) BEFORE render so the map paints the visible set
             -- this frame. Cheapest placement: once per draw, right before

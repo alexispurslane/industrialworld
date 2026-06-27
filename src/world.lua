@@ -54,6 +54,19 @@ local VISION_RANGE = 8
 local VISION_SHAPE = "sphere" -- 3D Euclidean ball
 local MEMORY_BRIGHTNESS = 0.35
 
+-- Physics tuning (the "basic silly physics engine"). Movement is
+-- impulse-driven: a keypress calls `self:accelerate(STEP_ACCEL*dx, ...)`;
+-- gravity is a constant downward `az`; friction damps horizontal velocity
+-- per second as `FRICTION^dt` (retains FRICTION-fraction/s, so you slide to
+-- a stop shortly after releasing input). Stairs give a direct velocity bump
+-- (SHUNT_VZ vertical / SHUNT_VH forward) in place of a teleport shunt.
+-- Exposed on `world` for callers (player, stairs, PhysicsObject).
+local GRAVITY = 20 -- cells/sec^2 downward (obeys_gravity entities)
+local STEP_ACCEL = 60 -- cells/sec^2 per arrow-key impulse (horizontal)
+local FRICTION = 0.02 -- per-second horizontal velocity retention (0.02 = 2%/s)
+local SHUNT_VZ = 7 -- cells/sec upward/downward bump a stairs imparts
+local SHUNT_VH = 3 -- cells/sec forward bump a stairs imparts
+
 -- X-ray hole through VISIBLE ceilings. Even with native-3D FOV revealing
 -- open-ceiling voxels, the player wants a clear cutout around them through
 -- any VISIBLE above-layer cells (a platform above, stairs head) so the
@@ -134,8 +147,8 @@ local world = {
     -- A cell holds a list (usually 0 or 1 entity); entity_at is O(1)
     -- instead of the O(capacity) pool scan it replaced. Maintained in
     -- allocate (post-init), destroy (pre-teardown), and every move/update
-    -- path that changes an entity's cell (Collidable:move, PhysicsObject
-    -- fall/update) via occ_rehash.
+    -- path that changes an entity's cell (Collidable:move,
+    -- PhysicsObject.update) via occ_rehash.
     occ = {},
     _shade = {}, -- depth-shaded appearance cache (rebuilt on cam.z change)
     _shade_max_depth = -1,
@@ -144,6 +157,14 @@ local world = {
     -- requires updating those too — kept here for discoverability/tests).
     VISION_RANGE = VISION_RANGE,
     VISION_SHAPE = VISION_SHAPE,
+    -- Physics tuning (mirrors the module locals above; the hot-loop reads
+    -- use the locals, so runtime tweaks need both updated — kept here for
+    -- discoverability/tests, same convention as VISION_*).
+    GRAVITY = GRAVITY,
+    STEP_ACCEL = STEP_ACCEL,
+    FRICTION = FRICTION,
+    SHUNT_VZ = SHUNT_VZ,
+    SHUNT_VH = SHUNT_VH,
 }
 
 -- Pre-allocate the pools of empty tables once.
@@ -771,9 +792,9 @@ function world.draw_entities(con)
             -- Only draw entities in the rendered z-window AND on a cell
             -- currently in the player's FOV. Memory cells' entities stay
             --- hidden by design.
-            if ez >= cz and ez <= ceil_top then
+            if math.floor(ez) >= cz and math.floor(ez) <= ceil_top then
                 local ex, ey = math.floor(e.x), math.floor(e.y)
-                local fi = ((ez * H) + ey) * W + ex
+                local fi = ((math.floor(ez) * H) + ey) * W + ex
                 if
                     ex >= 0
                     and ex < W
@@ -857,11 +878,11 @@ end
 
 --- Re-sync `e`'s occupancy entry to its CURRENT floor() cell. Removes it
 --- from the old bucket (if any) and adds it to the new one. Idempotent
---- and safe to call before an entity is tracked (init-time fall calls it
---- during allocate, before __cell is set; occ_remove no-ops). Stale cells
+--- and safe to call before an entity is tracked (allocate calls it
+--- post-init, before __cell is set; occ_remove no-ops). Stale cells
 --- (entity off-map) are still tracked by index so a later occ_remove
 --- finds the bucket. Call from every position-changing path
---- (allocate/destroy, Collidable:move, PhysicsObject fall/update).
+--- (allocate/destroy, Collidable:move, PhysicsObject.update).
 ---@param e table
 function world.occ_rehash(e)
     local new_cell = cell_idx(e)

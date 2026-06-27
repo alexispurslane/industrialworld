@@ -3,31 +3,28 @@
 --- A Collidable + Drawable entity that is NOT solid in the gameplay sense
 --- (it doesn't permanently block — it shunts the mover vertically) but its
 --- mask is ALL_BITS so it registers a collision with any collidable
---- entity. When a mover steps toward it, `Collidable:move` is blocked
---- (entity-vs-entity collision via the occupancy hash), firing `collision`;
---- this entity subscribed to the general `collision` event in `init` and
---- reacts (filtering on `blocker === self`, so it works for ANY mover
---- type, not just Player) by calling the MOVER's own `move` with a 3D
---- step: one cell in the entry direction (continuing past the stairs) and
---- one z level in the stairs's direction (UP for "up", DOWN for "down").
---- The mover:move guards solidity/bounds/occupancy at the landing cell;
---- on success we emit `moved` so the camera follows. The mover never
---- rests on the stairs cell.
+--- entity. When a mover slides into it, PhysicsObject's per-axis resolver is
+--- blocked (entity-vs-entity collision via the occupancy hash) and fires
+--- `collision`; this entity subscribed to the general `collision` event in
+--- `init` and reacts (filtering on `blocker === self`, so it works for ANY
+--- mover type, not just Player) by TELEPORTING the mover via its own `move`
+--- (Collidable's discrete collision-guarded tile step — NOT the integrator):
+--- a +2 step in the entry direction lands one cell PAST us at `stairs.z ± 1`,
+--- continuing the mover's direction of travel (not resting on the stairs
+--- cell). This is deliberate "magic" transit — stairs (and similar
+--- teleport-class entities) are the sanctioned exception to the integrator-
+--- only motion rule, since a physics arcing of the mover would land
+--- sideways/off-target relative to the actual approach. After the shunt the
+--- mover's velocity is zeroed so residual momentum doesn't carry it off.
 ---
 --- Direction of travel is set per-instance: `Stairs(x,y,z,"up")` draws "<"
---- and shunts z+1; `Stairs(x,y,z,"down")` draws ">" and shunts z-1. A pair
---- (an up stairs with a matching down stairs one floor above) forms a
+--- and lands at z+1; `Stairs(x,y,z,"down")` draws ">" and lands at z-1. A
+--- pair (an up stairs with a matching down stairs one floor above) forms a
 --- two-way vertical link.
 ---
---- The entry direction is inferred from relative position: at collision
---- time the step was blocked, so the mover is still one cell away on the
---- entry side — `dir = sign(stairs.pos - mover.pos)`. The landing is
---- `stairs.pos + dir` at `stairs.z ± 1`.
----
---- Note: mover:move (PhysicsObject) re-runs gravity after the step, so a
---- stairs landing must be grounded (solid below) or the mover will
---- re-fall — possibly right back down. Stairs are intentional vertical
---- transit, so place them with grounded landings.
+--- The entry direction is inferred from the mover's position relative to
+--- the stairs: the resolver snapped the mover back to the adjacent free
+--- cell on the entry side, so `dir = sign(stairs.pos - mover.pos)`.
 
 local class = require("classes")
 local Entity = require("entity")
@@ -72,15 +69,20 @@ function Stairs:init(x, y, z, direction)
     -- React when ANY mover collides with THIS stairs. The general
     -- `collision` event payload is (mover, blocker); filter on identity so
     -- only the actually-struck stairs reacts (every Stairs shares the
-    -- handler). Then call the mover's own move with a 3D step that PASSES
-    -- THROUGH the stairs: the mover is one cell back from us on the entry
-    -- side (its forward step was blocked), so a +2 step in the entry
-    -- direction lands one cell PAST us (stairs.x+dx) at stairs.z+dz —
-    -- continuing the mover's direction of travel, not resting on the
-    -- stairs cell. The landing cell is at a different z than us, so the
-    -- move won't re-collide with this stairs. The mover's own move guards
-    -- solidity/bounds/occupancy at the landing. On success, emit `moved`
-    -- so the camera (and anything else) follows.
+    -- handler). Stairs are a deliberate "magic" transit — they TELEPORT
+    -- the mover via its own `move` (Collidable:move: a discrete
+    -- collision-guarded tile step, NOT the physics integrator). The mover
+    -- was blocked trying to enter our cell and PhysicsObject's resolver
+    -- snapped it back to the adjacent free cell, so it sits one cell back
+    -- on the entry side — a +2 step in the entry direction lands one cell
+    -- PAST us at `stairs.z ± 1` (continuing the mover's direction of
+    -- travel, not resting on the stairs cell). The landing cell is at a
+    -- different z, so it won't re-collide with this stairs. The mover's
+    -- own `move` guards solidity/bounds/occupancy at the landing. On
+    -- success, zero the mover's velocity so residual slidey momentum
+    -- doesn't carry it sideways through the teleport discontinuity.
+    -- Motion otherwise stays integrator-driven; only stairs (and similar
+    -- magic transit) teleport.
     bus.subscribe(self, "collision", function(mover, blocker)
         if blocker ~= self then
             L:trace(
@@ -91,11 +93,10 @@ function Stairs:init(x, y, z, direction)
             )
             return
         end
-        -- Entry direction = from mover toward the stairs (mover is one
-        -- cell away on the entry side, since the step was blocked).
+        -- Entry direction = from mover toward the stairs (the mover's cell
+        -- is the adjacent free cell the resolver snapped it back to).
         local dx = self.x > mover.x and 1 or (self.x < mover.x and -1 or 0)
         local dy = self.y > mover.y and 1 or (self.y < mover.y and -1 or 0)
-        -- +2 in the entry direction: skip over our cell to land past us.
         L:debug(
             "[%s] shunt %s from (%.0f,%.0f,%d) dir %+d,%+d -> step %+d,%+d,%+d",
             self.__name or "stairs",
@@ -110,6 +111,9 @@ function Stairs:init(x, y, z, direction)
             d.dz
         )
         if mover:move(2 * dx, 2 * dy, d.dz) then
+            -- Cancel residual momentum through the teleport so the mover
+            -- doesn't drift sideways off the landing next frame.
+            mover.vx, mover.vy, mover.vz = 0, 0, 0
             L:debug(
                 "[%s] shunt OK -> %s now at (%.0f,%.0f,%d)",
                 self.__name or "stairs",
@@ -120,12 +124,11 @@ function Stairs:init(x, y, z, direction)
             )
             -- Narrate the climb for the message log. Stairs knows its own
             -- direction, so the prose lives here (the message module is a
-            -- dumb sink). Only narrate Player climbs for now — an NPC
-            -- shunting would spam the log without meaning to the player.
+            -- dumb sink). Only narrate Player climbs — an NPC shunting
+            -- would spam the log without meaning to the player.
             if mover.__name == "Player" then
                 bus.emit("message", d.dz > 0 and "You climb up." or "You climb down.", d.fg)
             end
-            bus.emit("moved", mover)
         else
             L:debug("[%s] shunt FAILED (landing blocked)", self.__name or "stairs")
         end

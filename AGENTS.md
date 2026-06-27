@@ -244,13 +244,15 @@ events.
 
 - **Semantic events** (`"moved"`, `"collision"`, `"damaged"`, `"ignited"`,
   `"quit"`, ...): named for what happened. Subscribers react to
-  semantics; `bus.emit("moved", player, dx, dy)` lets the subscriber
-  decide arg shape. Use these for gameplay reactions — a `Flammable`
-  mixin subscribes to `"damaged"` to maybe catch fire, the camera
-  subscribes to `"moved"` to follow. **Collisions**: `Collidable:move`
-  (blocked step) and `PhysicsObject:fall` (landing) emit a general
-  `"collision"` AND a class-named `"collision:<a>:<b>"` (mover first,
-  blocker second), e.g. `bus.emit("collision:Player:Wall", player, wall)`.
+  semantics; the `move` action (`bus.emit("move", dx, dy)`) is translated
+  by the Player into an ACCELERATION IMPULSE (`self:accelerate(...)`),
+  not a discrete step — see the Physics section below. Use semantic events
+  for gameplay reactions — a `Flammable` mixin subscribes to `"damaged"`
+  to maybe catch fire. **Collisions**: `PhysicsObject`'s per-axis resolver
+  (wall strike / landing) emits a general `"collision"` AND a class-named
+  `"collision:<a>:<b>"` (mover first, blocker second),
+  e.g. `bus.emit("collision:Player:Wall", player, wall)`. The Stairs
+  entity subscribes to `"collision"` to react with a velocity bump.
   Names are each party's `__name` (entities: class name; tile defs: the
   TileType name, set in tile.lua). Subscribe to `"collision:Mover:Blocker"`
   for a specific pairing, or `"collision"` for all.
@@ -271,7 +273,52 @@ events.
   via `bus.subscribe` (not bare `bus.on`) so teardown is tracked.
 - Don't emit game events from inside `update(dt)` hot paths every frame
   unless something actually changed — guard on state transitions
-  ("moved" fires when position changes, not every tick).
+  (a `collision` fires on a wall strike / landing, not every tick the
+  entity is resting against a surface).
+
+## Physics (the "basic silly physics engine")
+
+Motion is driven ENTIRELY by the semi-implicit Euler integrator in
+`Position` — **no direct position writes, no teleporting**. The player,
+projectiles, knockback, drift all go through it. Three mixins stack:
+- `Position` (leaf): owns `x/y/z`, `vx/vy/vz`, `ax/ay/az`, and the
+  integrator. `step_axis(axis, dt)` (semi-implicit Euler: `v += a*dt`
+  then `p += v*dt` for ONE axis) is factored out of `update(dt)` so a
+  composed mixin can resolve collisions axis-by-axis (sliding /
+  per-axis blocking) instead of moving all three at once. `move(dx,dy,dz)`
+  still exists (instant offset) for NON-player discrete steps; the player
+  does NOT use it.
+- `Collidable` (composed: Position + collision): owns the collision
+  `mask` + `should_collide` + `emit_collision_with`. Its `move` is the
+  discrete collision-guarded tile step (used by non-physics entities,
+  NOT the player).
+- `PhysicsObject` (composed: Collidable + gravity + integrator): the
+  motion pipeline. `init` sets `obeys_gravity` (NO pre-settle — gravity
+  lands it on the first update). `update(dt)`: (1) `az = -GRAVITY`
+  baseline for gravity-bound entities (overwrites transient vertical
+  input each frame; stairs bump `vz` directly, NOT `az`); (2) per-axis
+  `step_axis` + `resolve_axis` (x, y, z): if the integration crossed a
+  cell and the entered cell is blocked (tile Solid mask OR a collidable
+  entity via the occupancy hash), snap to the free cell boundary + zero
+  that axis's velocity (so you SLIDE along a wall on a diagonal, and
+  gravity LANDS you instead of snapping a z-stack) and emit
+  `collision`/`collision:<a>:<b>`; (3) clear `ax`/`ay` (input impulses are
+  per-frame, must not persist); (4) friction `vx,vy *= FRICTION^dt`
+  (frame-rate-independent damping toward rest); (5) `occ_rehash`.
+
+Tuning lives on `world` (mirrored as module locals in world.lua):
+`world.GRAVITY`, `world.STEP_ACCEL` (cells/sec² per arrow-key impulse),
+`world.FRICTION` (per-second velocity retention, ~0.02 = 2%/s),
+`world.SHUNT_VZ` / `world.SHUNT_VH` (the velocity bump a Stairs imparts).
+
+Input → physics: the Player subscribes to `bus` `"move"` and calls
+`self:accelerate(STEP_ACCEL*dx, STEP_ACCEL*dy, 0)` — an impulse, not a
+step. Stairs subscribe to `"collision"` and set `mover.vx/vy/vz` directly
+(a velocity bump) — the integrator arcs the mover up-and-over, no
+`mover:move()` teleport. There is NO `"moved"` event anymore: motion is
+continuous, so the camera follows every frame (`GameScreen.draw` syncs
+`world.cam` to `world.player` before FOV/render). `fall()` is GONE —
+gravity is a constant `az` resolved per-axis, same as horizontal.
 
 ## FFI wrapper convention
 

@@ -3,13 +3,16 @@
 --- Spatial state: position, velocity, acceleration — all three-axis
 --- (x, y, z). Two ways to move, and the consumer picks whichever fits:
 ---   * instant: `self:move(dx, dy, dz)` offsets position directly,
----     bypassing the physics integrator. Use for tile-based / discrete
----     movement (Player steps, Stairs shunts). `dz` defaults to 0, so
----     2D callers (old move(dx,dy) sites) keep working.
+---     bypassing the physics integrator. Use for discrete steps of
+---     NON-player entities (the player no longer uses this — its movement
+---     is impulse-driven via the integrator; see PhysicsObject). `dz`
+---     defaults to 0 so 2D callers keep working.
 ---   * integrated: set velocity / acceleration (`set_velocity`,
 ---     `set_acceleration`, `accelerate`) and let `update(dt)` integrate
 ---     motion each frame (semi-implicit Euler: v += a*dt; p += v*dt, per
----     axis). Use for projectiles, particles, knockback, drift.
+---     axis — factored as `step_axis` so a composed mixin can resolve
+---     collisions axis-by-axis). Use for the player, projectiles,
+---     particles, knockback, drift.
 ---
 --- Leaf mixin (law 1): owns its own state only; knows nothing of other
 --- mixins. `update` overrides Entity's no-op (first-wins copy on the
@@ -82,16 +85,31 @@ function Position:accelerate(ax, ay, az)
     self.az = self.az + (az or 0)
 end
 
+--- Integrate ONE axis by `dt` seconds (semi-implicit Euler: velocity
+--- first, then position). Factored out of `update` so a composed mixin
+--- (PhysicsObject) can step + collision-resolve axis-by-axis for sliding /
+--- per-axis blocking, instead of moving all three at once and having to
+--- guess which axis caused a diagonal collision. Position stays the single
+--- owner of the Euler formula.
+---@param axis string  "x", "y", or "z".
+---@param dt number  Seconds elapsed since the last update.
+function Position:step_axis(axis, dt)
+    local v = "v" .. axis
+    local a = "a" .. axis
+    self[v] = self[v] + self[a] * dt
+    self[axis] = self[axis] + self[v] * dt
+end
+
 --- Integrate motion by `dt` seconds (semi-implicit Euler: velocity first,
---- then position, per axis). Override Entity's no-op update.
+--- then position, per axis). Override Entity's no-op update. Equivalent to
+--- three `step_axis` calls in sequence (x, y, z) with no collision
+--- resolution — use this for entities that don't collide (or override
+--- `update` in a composed mixin that resolves per-axis).
 ---@param dt number  Seconds elapsed since the last update.
 function Position:update(dt)
-    self.vx = self.vx + self.ax * dt
-    self.vy = self.vy + self.ay * dt
-    self.vz = self.vz + self.az * dt
-    self.x = self.x + self.vx * dt
-    self.y = self.y + self.vy * dt
-    self.z = self.z + self.vz * dt
+    self:step_axis("x", dt)
+    self:step_axis("y", dt)
+    self:step_axis("z", dt)
 end
 
 return Position
