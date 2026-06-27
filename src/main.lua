@@ -26,6 +26,16 @@ local tcod = require("industrialworld.tcod")
 local Entity = require("entity")
 local world = require("world")
 local bus = require("event")
+local log = require("log")
+local L = log.get("main")
+
+-- Log floor: override via the IW_LOG env var ("trace"/"debug"/"info"/...).
+-- Defaults to "info" so production runs aren't spammed; the DEBUG
+-- instrumentation below is visible when you run with IW_LOG=debug.
+local env_lvl = os.getenv("IW_LOG")
+if env_lvl ~= nil then
+    log.set_level(env_lvl)
+end
 ----------------------------------------------------------------------------------------------------
 
 local function main()
@@ -35,7 +45,7 @@ local function main()
     -- sheet, so we pass tcod.charmap_tcod to map ASCII codepoints to the right tiles.
     local tileset, terr = tcod.Tileset.load_font("terminal.png", 32, 8, tcod.charmap_tcod)
     if not tileset then
-        io.stderr:write(("industrialworld: failed to load tileset: %s\n"):format(terr or "unknown"))
+        log.get("main"):error("failed to load tileset: %s", terr or "unknown")
         return 1
     end
 
@@ -48,18 +58,18 @@ local function main()
         tileset = tileset,
     })
     if not ctx then
-        io.stderr:write(
-            ("industrialworld: failed to create context: %s\n"):format(err or "unknown")
-        )
+        log.get("main"):error("failed to create context: %s", err or "unknown")
         return 1
     end
 
     local con = tcod.Console.new(cols, rows)
     if not con then
-        io.stderr:write("industrialworld: failed to create console\n")
+        log.get("main"):error("failed to create console")
         ctx:shutdown()
         return 1
     end
+
+    log.get("main"):info("industrialworld ready (%dx%d) log=%s", cols, rows, env_lvl or "info")
 
     -- Simple test map for the gravity model (FLOOR IS SOLID ground; walk in
     -- the OPEN AIR cell above it; gravity rests when the cell below is Solid):
@@ -159,12 +169,14 @@ local function main()
     local key = tcod.key
     local quit = false
     bus.subscribe(world, "quit", function()
+        L:debug("quit requested")
         quit = true
     end)
 
     -- Camera follows the player: subscribe to `moved` (emitted by Player
     -- after it acts) and refocus cam.x/y/z onto the player.
     bus.subscribe(world, "moved", function(p)
+        L:debug("camera follow -> (%.0f,%.0f,%d)", p.x, p.y, p.z)
         world.cam.x = math.floor(p.x)
         world.cam.y = math.floor(p.y)
         world.cam.z = p.z
@@ -195,6 +207,7 @@ local function main()
                 break
             end
             local vk = tonumber(kev.vk)
+            L:debug("key vk=%d", vk)
             -- General raw-key channel: keypress:<vk>.
             bus.emit(("keypress:%d"):format(vk))
             -- Semantic channel: the bound action, if any.

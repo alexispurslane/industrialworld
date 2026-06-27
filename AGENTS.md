@@ -182,6 +182,35 @@ Integer enums use the DSL in `src/enums.lua`, wired as the global
 - Don't iterate enums (`pairs`/`ipairs`) — index them. Reverse integer
   keys share the table with name keys, so there's nothing useful to loop.
 
+## Logging
+
+A singleton leveled, categorized logger in `src/log.lua`, reached via
+`local log = require("log")` (NOT global; same shared instance on every
+require, like `bus`). NOT a class — a registry of named loggers is just
+shared state with methods, so the class DSL buys nothing here.
+
+- `local L = log.get("player")` — idempotent; one cached logger per name.
+- `L:trace/debug/info/warn/error(msg, ...)` — literal `msg` when no extra
+  args (no format cost, no stray-`%` crash); `string.format` otherwise.
+  The format is pcall-guarded so a bad `%` becomes an error marker and
+  NEVER throws (a logger must not tank the game loop).
+- `L:<level>_lazy(fn)` — `fn` (returns one string) runs ONLY if the level
+  passes. Lua is strict, so call-site args evaluate regardless of filter;
+  wrap expensive arg computation in a builder to actually skip the work
+  when filtered.
+- Filters: `log.set_level("debug")` (global floor, default Info) and
+  `log.set_category("ai", "trace")` (per-module override; `nil` to clear,
+  falling back to the global floor). Levels come from `log.Level`
+  (`Trace`..`Error` = 1..5).
+- Sinks: `log.add_sink(function(level, name, msg) ... end)` returns an
+  UNSUBSCRIBE fn (same convention as `bus.on`); each sink is pcall-guarded
+  so a throwing sink never aborts the emit or starves the others. Default
+  sink writes `LEVEL  name: msg` to `io.stderr`.
+- Prefer a string format over `tostring()` spam: pass the raw value as a
+  format arg (`L:info("x=%d", x)`, not `L:info("x=" .. tostring(x))`) —
+  the format only runs when the level passes, so the concat is avoided
+  when filtered.
+
 ## Event bus
 
 A singleton pub/sub bus in `src/event.lua`, reached via

@@ -35,6 +35,8 @@ local Collidable = require("mixins.collidable")
 local Collision = require("collision")
 local Drawable = require("mixins.drawable")
 local bus = require("event")
+local log = require("log")
+local L = log.get("stairs")
 
 -- ALL_BITS: collide with any entity carrying ANY collision category. The
 -- Stairs is "not solid" (no permanent block — it shunts instead) but
@@ -64,6 +66,7 @@ function Stairs:init(x, y, z, direction)
     self.direction = direction or "up"
     Collidable.init(self, x, y, z, ALL_BITS)
     Drawable.init(self, x, y, z, d.fg, nil, d.glyph)
+    L:debug("placed %s-stairs at (%d,%d,%d)", self.direction, x, y, z)
 
     -- React when ANY mover collides with THIS stairs. The general
     -- `collision` event payload is (mover, blocker); filter on identity so
@@ -79,6 +82,12 @@ function Stairs:init(x, y, z, direction)
     -- so the camera (and anything else) follows.
     bus.subscribe(self, "collision", function(mover, blocker)
         if blocker ~= self then
+            L:trace(
+                "[%s] ignore collision %s<->%s (blocker is not this stairs)",
+                self.__name or "stairs",
+                mover.__name or "?",
+                blocker and blocker.__name or "?"
+            )
             return
         end
         -- Entry direction = from mover toward the stairs (mover is one
@@ -86,8 +95,31 @@ function Stairs:init(x, y, z, direction)
         local dx = self.x > mover.x and 1 or (self.x < mover.x and -1 or 0)
         local dy = self.y > mover.y and 1 or (self.y < mover.y and -1 or 0)
         -- +2 in the entry direction: skip over our cell to land past us.
+        L:debug(
+            "[%s] shunt %s from (%.0f,%.0f,%d) dir %+d,%+d -> step %+d,%+d,%+d",
+            self.__name or "stairs",
+            mover.__name or "?",
+            mover.x or 0,
+            mover.y or 0,
+            mover.z or 0,
+            dx,
+            dy,
+            2 * dx,
+            2 * dy,
+            d.dz
+        )
         if mover:move(2 * dx, 2 * dy, d.dz) then
+            L:debug(
+                "[%s] shunt OK -> %s now at (%.0f,%.0f,%d)",
+                self.__name or "stairs",
+                mover.__name or "?",
+                mover.x or 0,
+                mover.y or 0,
+                mover.z or 0
+            )
             bus.emit("moved", mover)
+        else
+            L:debug("[%s] shunt FAILED (landing blocked)", self.__name or "stairs")
         end
     end)
 end

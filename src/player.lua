@@ -30,6 +30,8 @@ local Renderable = require("mixins.renderable")
 local tile = require("tile")
 local world = require("world")
 local bus = require("event")
+local log = require("log")
+local L = log.get("player")
 
 local Player, super = class("Player", Entity):mixin(PhysicsObject, Drawable)
 
@@ -61,6 +63,7 @@ function Player:init(x, y, z)
             bus.emit("moved", self)
         end
     end)
+    L:debug("spawned at (%d,%d,%d) -> settled (%.0f,%.0f,%d)", x, y, z, self.x, self.y, self.z)
 end
 
 --- Draw the player, but with the bg taken from the tile under it (so the

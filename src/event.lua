@@ -20,6 +20,9 @@
 
 local bus = {}
 
+local log = require("log")
+local L = log.get("bus")
+
 -- listeners[name] = { cb, cb, ... }  (ordered; subscribe order preserved)
 local listeners = {}
 
@@ -30,6 +33,7 @@ local listeners = {}
 ---@param cb function  Handler: `cb(...)` receives emit's payload.
 ---@return function unsubscribe  Call to remove this subscription.
 function bus.on(name, cb)
+    L:trace("on %s", name)
     local list = listeners[name]
     if list == nil then
         list = {}
@@ -65,6 +69,7 @@ function bus.emit(name, ...)
     if list == nil then
         return
     end
+    L:trace("emit %s (%d subs)", name, #list)
     -- Snapshot: a handler may unsubscribe itself (or add a new sub) mid-
     -- dispatch. The snapshot freezes the set for THIS emit; the live list
     -- is what future emits see. Built with a loop (not table.unpack):

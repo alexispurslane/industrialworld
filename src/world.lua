@@ -19,6 +19,8 @@
 local ffi = require("ffi")
 local Map = require("map")
 local tile = require("tile")
+local log = require("log")
+local L = log.get("world")
 
 local INITIAL_ENTITY_CAP = 1000
 
@@ -122,6 +124,14 @@ function world.allocate(cls, ...)
     e.__slot = i -- engine infra (not mixin state); O(1) destroy lookup
     world.alive[i - 1] = 1
     world.occ_rehash(e) -- register at post-init cell (init may have moved it)
+    L:debug(
+        "allocate %s -> slot %d (%.0f,%.0f,%d)",
+        cls.__name or "?",
+        i,
+        e.x or 0,
+        e.y or 0,
+        e.z or 0
+    )
     return e
 end
 
@@ -143,6 +153,15 @@ function world.destroy(e)
         end
         e._unsubs = nil
     end
+    local slot = rawget(e, "__slot")
+    L:debug(
+        "destroy %s slot %s (%.0f,%.0f,%d)",
+        e.__name or "?",
+        tostring(slot),
+        e.x or 0,
+        e.y or 0,
+        e.z or 0
+    )
     world.occ_remove(e)
     local i = rawget(e, "__slot")
     if i ~= nil then
@@ -260,6 +279,7 @@ function world.peek(dz)
         off = max_off
     end
     world.cam.z_offset = off
+    L:debug("peek %+d -> z_offset=%d (ceil_top=%d)", dz, off, world.cam.z + off)
 end
 
 --- Resolve the glyph for cell (wx,wy,z) of tile-type `tv` using shade entry
@@ -339,6 +359,7 @@ function world.render_map(con)
         or world._shade_max_depth ~= cam.z
         or world._shade_above_count ~= above_count
     then
+        L:debug("rebuild shade (depth=%d above=%d)", cam.z, above_count)
         rebuild_shade(cam.z, above_count)
     end
     local shade = world._shade
@@ -543,6 +564,14 @@ function world.occ_rehash(e)
     end
     bucket[#bucket + 1] = e
     e.__cell = new_cell
+    L:trace(
+        "occ_rehash %s -> cell %d (%.0f,%.0f,%d)",
+        e.__name or "?",
+        new_cell,
+        e.x or 0,
+        e.y or 0,
+        e.z or 0
+    )
 end
 
 --- Advance the simulation by `dt` seconds: tick every living entity's

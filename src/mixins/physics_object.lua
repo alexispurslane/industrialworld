@@ -30,6 +30,8 @@ local Position = require("mixins.position")
 local Collidable = require("mixins.collidable")
 local world = require("world")
 local tile = require("tile")
+local log = require("log")
+local L = log.get("physics")
 
 local PhysicsObject = mixin({}, Collidable)
 
@@ -43,6 +45,7 @@ local PhysicsObject = mixin({}, Collidable)
 function PhysicsObject:init(x, y, z, mask, obeys_gravity)
     Collidable.init(self, x, y, z, mask)
     self.obeys_gravity = obeys_gravity or false
+    L:debug("[%s] init gravity=%s at (%d,%d,%d)", self.__name or "?", self.obeys_gravity, x, y, z)
     self:fall()
 end
 
@@ -78,6 +81,13 @@ function PhysicsObject:fall()
     -- Resting-in-place after a horizontal step has start_z == self.z, so
     -- it won't spam a "collision:Player:Floor" every step.
     if self.z ~= start_z and landed_on ~= nil then
+        L:debug(
+            "[%s] fell %d -> %d (landed on %s)",
+            self.__name or "?",
+            start_z,
+            self.z,
+            landed_on.__name or "?"
+        )
         self:emit_collision_with(landed_on)
     end
 end

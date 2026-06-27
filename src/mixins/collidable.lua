@@ -33,6 +33,8 @@ local mixin = require("classes").mixin
 local bit = require("bit")
 local Position = require("mixins.position")
 local Collision = require("collision")
+local log = require("log")
+local L = log.get("collidable")
 
 local Collidable = mixin({}, Position)
 
@@ -67,6 +69,14 @@ end
 ---@param other table  The collidable `self` collided with.
 function Collidable:emit_collision_with(other)
     local bus = require("event")
+    L:debug(
+        "collision %s <-> %s at (%.0f,%.0f,%d)",
+        self.__name or "?",
+        other.__name or "?",
+        self.x or 0,
+        self.y or 0,
+        self.z or 0
+    )
     bus.emit("collision", self, other)
     bus.emit(
         ("collision:%s:%s"):format(self.__name or "unknown", other.__name or "unknown"),
@@ -104,6 +114,14 @@ function Collidable:move(dx, dy, dz)
     local tv = map.types:index(nx, ny, nz)
     local cb = tile.defs[tv]
     if cb ~= nil and self:should_collide(cb) then
+        L:debug(
+            "[%s] step %+d,%+d,%+d blocked by tile %s",
+            self.__name or "?",
+            dx,
+            dy,
+            dz or 0,
+            cb.__name or "?"
+        )
         self:emit_collision_with(cb)
         return false
     end
@@ -112,11 +130,20 @@ function Collidable:move(dx, dy, dz)
     -- spatial-hash lookup now (was an O(n) pool scan).
     local e = world.entity_at(nx, ny, nz, self)
     if e ~= nil and self:should_collide(e) then
+        L:debug(
+            "[%s] step %+d,%+d,%+d blocked by entity %s",
+            self.__name or "?",
+            dx,
+            dy,
+            dz or 0,
+            e.__name or "?"
+        )
         self:emit_collision_with(e)
         return false
     end
     Position.move(self, dx, dy, dz)
     world.occ_rehash(self)
+    L:debug("[%s] step %+d,%+d,%+d -> (%d,%d,%d)", self.__name or "?", dx, dy, dz or 0, nx, ny, nz)
     return true
 end
 

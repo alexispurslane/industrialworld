@@ -35,6 +35,8 @@
 local ffi = require("ffi")
 local class = require("classes")
 local tile = require("tile")
+local log = require("log")
+local L = log.get("map")
 
 local FieldKind = tile.FieldKind
 
@@ -191,13 +193,16 @@ function Map:init(w, h, d, schema)
     -- One Field instance per property; all share the Field class table, so
     -- `map.types.index` and `map.flags.index` are the same function. The
     -- Field owns its z-major cdata array (zero-filled in Field:init).
+    local nfields = 0
     self.fields = {}
     for name, spec in pairs(self.schema) do
         local ct = ctype_for_field(spec)
         local f = Field(ct, spec.kind, w, h, d, self)
         self.fields[name] = f
         self[name] = f
+        nfields = nfields + 1
     end
+    L:debug("map %dx%dx%d (%d cells, %d fields)", w, h, d, self.count, nfields)
 end
 
 --- Linear index for (x, y, z). 0-based; x fastest, then y, then z.
