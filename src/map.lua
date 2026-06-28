@@ -178,6 +178,19 @@ end
 --- Construct a layered map of size W x H x D.
 --- Defaults to the engine tile schema (src/tile.lua); pass an explicit
 --- `schema` only to swap schemas (e.g. for tests).
+---
+--- LIGHTING (engine-managed, NOT a schema tile property): a per-frame
+--- z-major SoA `uint8_t[count]` `light` array (0-255 accumulated light
+--- value per cell) lives ALONGSIDE the schema fields. The lighting pass
+--- (`world.update_lights` / `world.clear_lights`) clears it each frame (to
+--- 0 when `is_dark`, else it early-outs and the renderer uses the sunlight
+--- depth-shade path) and each active LightSource adds into it. It is NOT a
+--- Field (no per-tile persistence, no `set`/`index` Lua wrapper) — it's a
+--- raw hot-loop cdata the renderer + light flood read/write directly via
+--- `map:light_idx(x,y,z)` / `map.light.cdata[i]`. `is_dark` ("does the sun
+--- exist?") is a per-map flag: false (default) = the depth/ceiling/memory
+--- shading is the ambient sun and lights are invisible; true = no sun, the
+--- `light` array drives brightness instead.
 ---@param w integer  Width (x).
 ---@param h integer  Height (y).
 ---@param d integer  Depth (z, number of layers).
@@ -203,6 +216,25 @@ function Map:init(w, h, d, schema)
         nfields = nfields + 1
     end
     L:debug("map %dx%dx%d (%d cells, %d fields)", w, h, d, self.count, nfields)
+
+    -- Lighting (engine-managed, per-frame, NOT a schema tile property).
+    -- `light` is a raw z-major SoA uint8_t[count] accumulator; `is_dark`
+    -- controls whether the per-frame pass runs (and which render path is
+    -- taken). See the docstring above for the full model.
+    self.light = ffi.new("uint8_t[?]", self.count) -- 0-default (= unlit)
+    self.is_dark = false -- "does the sun exist?" (false = daylight render path)
+end
+
+--- Linear index into the `light` (and any z-major SoA) array for (x, y, z).
+--- Same formula as the schema-field `idx`; exposed so the lighting hot path
+--- (`world.update_lights`, `world.render_map` dark branch) can write/read
+--- `map.light.cdata[map:light_idx(x,y,z)]` without a Field wrapper.
+---@param x integer
+---@param y integer
+---@param z integer
+---@return integer idx
+function Map:light_idx(x, y, z)
+    return idx(self.w, self.h, x, y, z)
 end
 
 --- Linear index for (x, y, z). 0-based; x fastest, then y, then z.

@@ -32,7 +32,7 @@
 
 local Anchor = {}
 
---- @param target table|fun():table|string  a rect (widget or table), a
+--- @param target table|string|fun():table  a rect (widget or table), a
 ---        function returning one, or "screen" to anchor to the console.
 --- @param side string "top"|"bottom"|"left"|"right"
 --- @param alignment string "start"|"center"|"end"
@@ -72,6 +72,7 @@ function Anchor:resolve_target()
     if type(t) == "function" then
         t = t()
     end
+    ---@cast t table
     return t
 end
 

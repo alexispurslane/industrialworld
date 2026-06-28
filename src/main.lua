@@ -91,6 +91,7 @@ local function main()
     -- console. Set before any render call this frame.
     local view_rows = rows - messages.PANEL_H
     world.cam.view_rows = view_rows
+    world.cam.view_cols = cols
 
     -- Wire the message log: subscribe to the `message` event on the bus
     -- (systems narrate via `bus.emit("message", text, fg)`) and seed it
@@ -203,6 +204,16 @@ local function main()
     -- like the player.
     Dummy(cx - 3, cy - 1, 1, 4.0, "#", 2, 2)
     Dummy(cx - 3, cy + 1, 1, 0.3, "o")
+    -- LIGHTING DEMO: plunge the map into darkness (the "sun" is gone) and
+    -- drop a stationary Brazier (sphere light, radius 8) a few cells off so
+    -- you can see a fixed lit pool vs the player's carried torch (radius 6,
+    -- baked into Player). Validate: lit pools around both lights, dark
+    -- unlit visible space stretching to the viewport edge (proving the
+    -- unlimited player FOV), soft falloff at the radius edge, light stops
+    -- at Opaque walls, and memory cells dim uniformly (no per-cell light).
+    m.is_dark = true
+    local Brazier = require("brazier")
+    Brazier(cx + 5, cy - 6, 1, 13)
     -- Pre-first-frame camera snap (before the first update/draw runs).
     world.cam.x = math.floor(player.x)
     world.cam.y = math.floor(player.y)
@@ -314,6 +325,7 @@ local function main()
                 con.h = h
                 view_rows = h - messages.PANEL_H
                 world.cam.view_rows = view_rows
+                world.cam.view_cols = w
                 -- The message log spans the full width; update its bounds.
                 messages.on_resize(w)
                 L:info("window resized to %dx%d (view_rows=%d)", w, h, view_rows)
@@ -400,10 +412,20 @@ local function main()
             end
         end
 
-        -- 2. dt since last frame.
+        -- 2. dt since last frame. CLAMPED to the frame budget: when a
+        --    frame runs long (the per-frame lighting flood on a large
+        --    map can be costly), wall-clock `dt` would spike and feed a
+        --    huge step into the semi-implicit Euler integrator -> the
+        --    player lurches/overshoots a tap. Capping at FRAME_TIME keeps
+        --    the simulation steady and responsive under hitches (yes,
+        --    this means we simulate slightly slow on a slow frame rather
+        --    than exploding — the lesser evil for a real-time game).
         local now = os.clock()
         local dt = now - last
         last = now
+        if dt > FRAME_TIME then
+            dt = FRAME_TIME
+        end
 
         -- 3. Advance the simulation only while Playing.
         if game_state.is(game_state.Mode.Playing) then

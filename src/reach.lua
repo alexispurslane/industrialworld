@@ -293,6 +293,7 @@ function reach.can_reach(from, target, opts)
         local res = flood(flood_opts(opts, from))
         return first_matching_entity(opts, res.reached, target) ~= nil
     end
+    ---@cast target table
     local tx, ty, tz = target_cell(target)
     return path_reaches(opts, from, tx, ty, tz)
 end
@@ -316,6 +317,7 @@ function reach.can_reach_from_set(positions, target, opts)
         local cells = union_cells(opts.dims, per_source)
         return first_matching_entity(opts, cells, target) ~= nil
     end
+    ---@cast target table
     local tx, ty, tz = target_cell(target)
     for _, p in ipairs(positions) do
         if path_reaches(opts, p, tx, ty, tz) then

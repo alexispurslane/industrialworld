@@ -5,6 +5,9 @@ local ScreenRect = require("mixins.ui.screen_rect")
 local ProgressFill = require("mixins.ui.progress_fill")
 local bus = require("event")
 
+---@class ProgressBar
+---@field set_percent fun(self: ProgressBar, p: number)
+---@field destroy fun(self: ProgressBar)
 local ProgressBar, super = class("ProgressBar", Widget):mixin(ScreenRect, ProgressFill)
 
 function ProgressBar:init(con, id, x, y, width, bg, fill_bg)

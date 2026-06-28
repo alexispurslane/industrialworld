@@ -21,6 +21,7 @@ local bit = require("bit")
 local Map = require("map")
 local tile = require("tile")
 local fov = require("fov")
+local pf = require("pathfinding")
 local blt = require("industrialworld.blt")
 local palette = require("palette")
 local log = require("log")
@@ -41,18 +42,20 @@ local MIN_BRIGHTNESS = 0.25
 local CEIL_FADE_PER_LEVEL = 0.35
 local CEIL_MIN_BRIGHTNESS = 0.3
 
--- Field-of-view (native 3D; see src/fov.lua). The player's vision is a
--- constant-radius 3D sphere of opaque-blocked rays; each frame the set of
--- Visible cells is recomputed from the player's cell and Explored
--- (memory) is the union of every Visible set ever computed. Cells with
--- NEITHER flag render dark (default-dark world). Explored-but-not-Visible
--- cells render at MEMORY_BRIGHTNESS (applied ON TOP of the depth/height
--- shade) so remembered terrain keeps its per-layer falloff but reads dim.
--- Exposed on `world` (world.VISION_RANGE / world.VISION_SHAPE) so callers
--- / tests can tune; the locals below are the hot-loop reads.
-local VISION_RANGE = 8
-local VISION_SHAPE = "sphere" -- 3D Euclidean ball
-local MEMORY_BRIGHTNESS = 0.35
+-- Field-of-view (native 3D; see src/fov.lua). The player's vision is
+-- UNLIMITED in range and VIEWPORT-BOUNDED: there is no radius and no
+-- spherical falloff — the player sees as far as real eyes do, blocked only
+-- by opaque terrain. We bound the COMPUTED set each frame to the rendered
+-- viewport (the camera's screen rect × the rendered z-window), so cells
+-- outside the painted region don't waste rays. Only the per-frame Visible
+-- set is kept — NO MEMORY (no Explored accumulation): a cell renders iff
+-- it's Visible this frame. This is the hard render boundary; combined with
+-- the darkness/lighting model it removes the class of brightness-inversion
+-- bugs where remembered terrain read brighter than visible-but-unlit cells.
+--
+-- (The old VISION_RANGE/VISION_SHAPE sphere model is removed; `fov` still
+-- supports `range`/`shape` for finite-radius vision like NPC sight, but the
+-- player no longer uses them — it passes a viewport `box` instead.)
 
 -- Physics tuning (the "basic silly physics engine"). Movement is
 -- impulse-driven: a keypress calls `self:accelerate(STEP_ACCEL*dx, ...)`;
@@ -75,9 +78,9 @@ local SHUNT_VH = 3 -- cells/sec forward bump a stairs imparts
 -- any VISIBLE above-layer cells (a platform above, stairs head) so the
 -- player cell reads and nearby above-layer content shows without the
 -- ceiling-floor occluding it. Applied ONLY to cells that are BOTH visible
--- (in the FOV) AND on a layer above the camera (z > cam.z) — memory/dark
--- cells are untouched (no hole carved into remembered terrain). Rings by
--- squared horizontal distance from the player cell:
+-- (in the FOV) AND on a layer above the camera (z > cam.z) — cells not
+-- visible this frame render nothing, so they're untouched by definition.
+-- Rings by squared horizontal distance from the player cell:
 --   CORE  (r <= XRAY_CORE_R) : alpha 0  → above-layer cell NOT drawn (hole).
 --   RING1 (CORE..RING1_R)    : alpha A1 → very transparent (mostly hole).
 --   RING2 (RING1..RING2_R)   : alpha A2 → slightly less transparent.
@@ -153,13 +156,19 @@ local world = {
     -- path that changes an entity's cell (Collidable:move,
     -- PhysicsObject.update) via occ_rehash.
     occ = {},
+    -- Light registry: the set of living LightSource entities. Walked each
+    -- frame by `world.update_lights` (which reads each light's Position +
+    -- shape params and floods the map's `light` SoA array). Maintained by
+    -- `world.add_light` (called from `LightSource.init`) and pruned by the
+    -- unregister fn it returns (tracked on the entity's `_unsubs`, walked on
+    -- `world.destroy`) — so a destroyed light is removed the same frame,
+    -- exactly like a `bus.subscribe` teardown.
+    lights = {},
     _shade = {}, -- depth-shaded appearance cache (rebuilt on cam.z change)
     _shade_max_depth = -1,
-    -- Vision config (tunable; the hot-loop reads use the module locals
-    -- VISION_RANGE / VISION_SHAPE above, so changing these at runtime
-    -- requires updating those too — kept here for discoverability/tests).
-    VISION_RANGE = VISION_RANGE,
-    VISION_SHAPE = VISION_SHAPE,
+    -- (Player vision is unlimited + viewport-bounded now; the old
+    -- VISION_RANGE/VISION_SHAPE sphere model is removed. `fov` still
+    -- supports range/shape for finite-radius vision like NPC sight.)
     -- Physics tuning (mirrors the module locals above; the hot-loop reads
     -- use the locals, so runtime tweaks need both updated — kept here for
     -- discoverability/tests, same convention as VISION_*).
@@ -488,19 +497,31 @@ function world.peek(dz)
 end
 
 --- Recompute the player's field of view from the camera cell (which tracks
---- the player via the `moved` subscription in main.lua). NATIVE 3D FOV
---- (src/fov.lua): one 3D supercover ray per candidate voxel in the vision
---- sphere, blocked by any `Opaque` voxel — so walls block in-plane and a
---- solid ceiling cuts off upper layers except where it's Open (a
---- skylight lets rays climb). Each frame:
----   1. Clear `TileFlags.Visible` on EVERY cell (the per-frame visibility
----      set is ephemeral; only `Explored` accumulates).
----   2. Compute the visible set from the player's cell.
----   3. Mark `Visible` + OR `Explored` on the cells that are ALSO in the
----      RENDERED z-window (0..cam.z + z_offset) — the same cut render_map
----      uses. Cells in the FOV ball but ABOVE the peek height are discarded:
----      they never paint, so they must not enter memory either. This keeps
----      memory consistent with what the player actually SAW rendered.
+--- the player via the per-frame sync in GameScreen.draw). NATIVE 3D FOV
+--- (src/fov.lua): one 3D supercover ray per candidate voxel, blocked by any
+--- `Opaque` voxel — so walls block in-plane and a solid ceiling cuts off
+--- upper layers except where it's Open (a skylight lets rays climb).
+---
+--- UNLIMITED-RANGE, VIEWPORT-BOUNDED: there is NO vision radius and NO
+--- spherical falloff — the player sees as far as real eyes do, blocked only
+--- by opaque terrain. We bound the COMPUTED set to the rendered viewport (the
+--- camera's screen rect × the rendered z-window 0..cam.z+z_offset): cells
+--- outside the viewport never paint, so casting rays to them would be wasted
+--- work. The box is passed to fov via `opts.box`; fov.visible_tiles
+--- iterates exactly that extent instead of a vision sphere.
+---
+--- NO MEMORY: only the per-frame Visible set is kept — what the player can
+--- see right now. There is no Explored/memory flag: a cell renders iff it's
+--- Visible this frame, so moving away from a lit area drops it to black
+--- immediately (a torch in a pitch cave; you see only what's currently lit).
+--- This removes the whole class of brightness-inversion bugs where remembered
+--- terrain read brighter than visible-but-unlit cells.
+---
+--- Each frame:
+---   1. Clear `TileFlags.Visible` on EVERY cell (per-frame; no accumulation).
+---   2. Compute the visible set from the player's cell over the viewport box.
+---   3. Mark `Visible` on the visible cells (the box already bounds them to
+---      the rendered z-window; the per-cell z clamp is a defensive no-op).
 ---
 --- Opaque predicate reads `band(flags, Opaque)` straight from the map's
 --- flags field cdata. Expensive part (the field build) is `fov.visible_tiles`,
@@ -511,36 +532,533 @@ function world.update_fov()
     local flags = map.flags.cdata
     local TF = tile.TileFlags
     local VisibleBit = TF.Visible
-    local ExploredBit = TF.Explored
     local OpaqueBit = TF.Opaque
-    -- 1. Clear this frame's Visible everywhere (Explored persists).
+    local OpaqueBit = TF.Opaque
+    -- 1. Clear this frame's Visible everywhere (no accumulation).
     for i = 0, map.count - 1 do
         flags[i] = bit.band(flags[i], bit.bnot(VisibleBit))
     end
-    -- 2. Compute the visible set from the camera cell (the player).
+    -- 2. Compute the visible set from the camera cell (the player) over the
+    --    RENDERED VIEWPORT BOX (unlimited range, viewport-bounded). Derive
+    --    the same ox/oy/z-window render_map paints so FOV + render match the
+    --    painted region exactly. view_cols/view_rows come from GameScreen each
+    --    frame (set right before this call); fall back to map extent if unset.
     local cam = world.cam
+    local cols = cam.view_cols or W
+    local vrows = cam.view_rows or H
+    local z_max = cam.z + (cam.z_offset or 0)
+    if z_max < 0 then
+        z_max = 0
+    end
+    if z_max > D - 1 then
+        z_max = D - 1
+    end
+    local ox = cam.x - math.floor(cols / 2)
+    local oy = cam.y - math.floor(vrows / 2)
+    -- Clamp the box to the grid (fov also clamps, but clamping here keeps the
+    -- candidate count minimal for an off-edge camera).
+    local minx = math.max(0, ox)
+    local miny = math.max(0, oy)
+    local minz = 0
+    local maxx = math.min(W - 1, ox + cols - 1)
+    local maxy = math.min(H - 1, oy + vrows - 1)
+    local maxz = z_max
     local vis_tiles = fov.visible_tiles({ cam.x, cam.y, cam.z }, {
         dims = { W, H, D },
         opaque = function(x, y, z)
             return bit.band(flags[((z * H) + y) * W + x], OpaqueBit) ~= 0
         end,
-        range = VISION_RANGE,
-        shape = VISION_SHAPE,
+        box = { minx, miny, minz, maxx, maxy, maxz },
     })
-    -- 3. Mark Visible + Explored, but ONLY on cells in the rendered z-window
-    --    (0..cam.z + z_offset) — the same cut render_map applies. Visible
-    --    cells above the peek height never paint, so they don't enter the
-    --    Visible flag (renderer wouldn't read them) NOR the Explored union
-    --    (memory must match what was actually seen). Explored is sticky, so
-    --    re-setting is a no-op for already-remembered cells.
-    local z_max = cam.z + (cam.z_offset or 0)
-    local both = bit.bor(VisibleBit, ExploredBit)
+    -- 3. Mark Visible ONLY. No memory/Explored: the Visible set is purely
+    --    per-frame (what the player can see right now). Memory is gone — it
+    --    was the source of brightness-inversion bugs (remembered terrain
+    --    reading brighter than visible-but-unlit cells). Now FOV is the hard
+    --    render boundary: a cell renders iff it's Visible this frame.
     for _, c in ipairs(vis_tiles) do
         local cz = c[3]
         if cz >= 0 and cz <= z_max then
             local i = ((cz * H) + c[2]) * W + c[1]
-            flags[i] = bit.bor(flags[i], both)
+            flags[i] = bit.bor(flags[i], VisibleBit)
         end
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- Lighting
+----------------------------------------------------------------------------------------------------
+
+--- Clear the per-frame light array. When `is_dark` (no sun), every cell is
+--- reset to 0 (unlit) so LightSource floods fill it this frame; when not
+--- `is_dark` (the sun exists), every cell is reset to 255 (fully lit) and
+--- `world.update_lights` early-outs, so a torch in daylight does nothing.
+---
+--- `world.update_lights` calls this first, then each active LightSource adds
+--- into the array. Returns the value the array was filled with (0 or 255) so
+--- callers can early-out the light flood when the sun is up.
+---@return integer fill  the value the light array was reset to (0 or 255).
+function world.clear_lights()
+    local map = world.map
+    if not map.is_dark then
+        -- Sun exists: daylight render path. Fill 255 so any straggling
+        -- light from a previous dark frame is wiped; the flood is skipped
+        -- by the caller, and render uses the depth-shade path unchanged.
+        ffi.fill(map.light, map.count, 255)
+        return 255
+    end
+    ffi.fill(map.light, map.count, 0)
+    return 0
+end
+
+--- Register a LightSource entity with the world light registry (called from
+--- `LightSource.init`). Returns an UNREGISTER fn the caller appends to the
+--- entity's `_unsubs` (the SAME convention as `bus.subscribe`), so
+--- `world.destroy` walking `_unsubs` newest-first removes a destroyed light
+--- the same frame. Idempotent: re-registering an already-registered light is
+--- a no-op; the returned unregister fn removes it from the set (not a count).
+---@param light table  a LightSource-bearing entity (has light_* fields + Position).
+---@return function unregister  call to remove `light` from the registry.
+function world.add_light(light)
+    world.lights[light] = true
+    return function()
+        world.lights[light] = nil
+    end
+end
+
+--- Remove a light from the registry. Idempotent. Convenience form for ad-hoc
+--- removal; the preferred path is the `_unsubs` fn `add_light` returns
+--- (auto-run by `world.destroy`).
+---@param light table
+function world.remove_light(light)
+    world.lights[light] = nil
+end
+
+----------------------------------------------------------------------------------------------------
+-- Light propagation (per-frame flood)
+----------------------------------------------------------------------------------------------------
+
+-- Module-level upvalues for the light flood hot path: the opaque flag, the
+-- light array, and dims. Set at the top of `world.update_lights` so the
+-- `passable` / `transition` / cone-filter closures capture locals, not
+-- `world.*` table lookups per cell (the flood calls them once per visited
+-- neighbor — table lookups there would dominate).
+local _opaque_bit
+local _light_cdata
+local _light_flags
+local _light_dims_w, _light_dims_h, _light_dims_d
+
+-- Wall-surface flood scratch (see the WALL-SURFACE PASS in update_lights):
+-- `wdist` maps cell-index -> accumulated path distance for opaque cells
+-- reached by THIS light's wall pass (a Lua table keyed only by reached walls —
+-- typically a tiny set, the thin walls near the light, so a table beats a
+-- full-count uint32 array). Each wave builds a fresh frontier list (`local` in
+-- the loop) — the wall set near a light is tiny, so per-wave allocation is
+-- negligible and the logic stays simple (no double-buffer swap bugs).
+-- `WALL_OFFSETS` is the 26-connected neighbor offsets (x,y,z triples, flat)
+-- so the wall pass matches the air flood's 26-connected spread.
+local wdist = {}
+local WALL_OFFSETS = (function()
+    local t = {}
+    for dz = -1, 1 do
+        for dy = -1, 1 do
+            for dx = -1, 1 do
+                if not (dx == 0 and dy == 0 and dz == 0) then
+                    t[#t + 1] = dx
+                    t[#t + 1] = dy
+                    t[#t + 1] = dz
+                end
+            end
+        end
+    end
+    return t
+end)()
+
+--- Light-specific vertical transition: light climbs or descends a z-layer
+--- through ANY non-opaque voxel (the cell we're in AND the cell above/below
+--- are both non-opaque). This models light passing through Open air / an
+--- Open ceiling "skylight" hole, exactly as the native-3D FOV rays do — NOT
+--- restricted to stairs/ramps the way the walking `default_transition` is
+--- (light doesn't need a staircase). Returns an iterator of reachable
+--- (nx, ny, nz) vertical neighbors.
+local function light_transition(x, y, z, opts)
+    -- We must consult opacity at the CURRENT cell too: a light inside an
+    -- opaque wall shouldn't leak vertically. (Non-opaque cells: Open air,
+    -- Floor — light passes; Wall/closed ceiling blocks.)
+    local flags = _light_flags
+    local W, H = _light_dims_w, _light_dims_h
+    if bit.band(flags[((z * H) + y) * W + x], _opaque_bit) ~= 0 then
+        return function() end
+    end
+    local D = _light_dims_d
+    local dirs = {}
+    if z + 1 < D then
+        if bit.band(flags[(((z + 1) * H) + y) * W + x], _opaque_bit) == 0 then
+            dirs[#dirs + 1] = 1
+        end
+    end
+    if z - 1 >= 0 then
+        if bit.band(flags[(((z - 1) * H) + y) * W + x], _opaque_bit) == 0 then
+            dirs[#dirs + 1] = -1
+        end
+    end
+    if #dirs == 0 then
+        return function() end
+    end
+    local i = 0
+    return function()
+        i = i + 1
+        if i > #dirs then
+            return nil
+        end
+        return x, y, z + dirs[i]
+    end
+end
+
+--- Per-frame lighting pass. When the map is NOT dark (`is_dark == false`),
+--- the sun exists and lights are invisible — `clear_lights` fills 255 and we
+--- early-out (render uses the depth-shade path unchanged).
+---
+--- When dark: `clear_lights(0)` first, then for EACH registered LightSource
+--- run a `pf.distance_field` Dijkstra flood from its cell over the connected
+--- non-opaque air volume: `passable = not opaque`, a light-specific
+--- `transition` (climbs/descends through ANY non-opaque voxel, not just
+--- stairs), euclidean `cost` (1 cardinal / sqrt2 diagonal, so the flood is
+--- a true 3D sphere), and `budget = radius` (cost cap = the light's reach).
+--- Walk the reached cells; each contributes `floor(peak * (1 - g/radius))`
+--- (linear falloff to 0 at `radius`), ADDED into the map `light` array and
+--- clamped at 255 (overlapping lights sum). gscore is an INTEGER (euclidean
+--- cost scaled here by 1000 so sqrt2 ≈ 1414 fits an int32), so we scale back.
+---
+--- Falloff by PATH distance (Dijkstra), not euclidean bird's-eye — this is
+--- Option A: light bends around corners and leaks through doorways, the
+--- soft roguelike look. Opaque voxels are light-opaque (no passable), so
+--- light fills a room's connected air and stops at walls.
+function world.update_lights()
+    local map = world.map
+    if not map.is_dark then
+        world.clear_lights() -- fills 255 + early-out (daylight path)
+        return
+    end
+    local W, H, D = map.w, map.h, map.d
+    local count = map.count
+    local flags = map.flags.cdata
+    local light = map.light
+    local OpaqueBit = tile.TileFlags.Opaque
+    -- Reset upvalues for the closures captured below (set ONCE per frame,
+    -- not per light).
+    _opaque_bit = OpaqueBit
+    _light_cdata = light
+    _light_flags = flags
+    _light_dims_w, _light_dims_h, _light_dims_d = W, H, D
+    -- Clear to 0 ONLY the rendered viewport: render_map reads `light[idx]`
+    -- solely for cells in the cam view box (cols × view_rows × z-window),
+    -- so stale light values outside it are never read and need not be cleared.
+    -- On the 2000×2000×10 map this turns a full-map 40 MB memset/frame into
+    -- a ~few-KB box clear. Cells scrolled into view next frame are re-cleared
+    -- + re-flooded then, so partial clearing stays correct.
+    local cam = world.cam
+    local vcols = cam.view_cols or W
+    local vrows = cam.view_rows or H
+    local z_max = cam.z + (cam.z_offset or 0)
+    if z_max < 0 then
+        z_max = 0
+    end
+    if z_max > D - 1 then
+        z_max = D - 1
+    end
+    local ox = cam.x - math.floor(vcols / 2)
+    local oy = cam.y - math.floor(vrows / 2)
+    local cx0 = ox < 0 and 0 or ox
+    local cx1 = ox + vcols - 1
+    if cx1 > W - 1 then
+        cx1 = W - 1
+    end
+    local cy0 = oy < 0 and 0 or oy
+    local cy1 = oy + vrows - 1
+    if cy1 > H - 1 then
+        cy1 = H - 1
+    end
+    local span = cx1 - cx0 + 1
+    if span > 0 and cy0 <= cy1 then
+        for z = 0, z_max do
+            local zbase = (z * H) * W
+            for y = cy0, cy1 do
+                ffi.fill(light + zbase + y * W + cx0, span, 0)
+            end
+        end
+    end
+
+    if next(world.lights) == nil then
+        return -- no lights: the world stays fully dark this frame
+    end
+
+    -- Euclidean cost scaled by 1000 (integer Dijkstra; sqrt2 = 1414, so a
+    -- radius of e.g. 8 becomes a budget of 8000). Cardinal step = 1000,
+    -- diagonal = 1414. We scale back by /1000 when computing intensity.
+    local COST_SCALE = 1000
+    local sqrt2 = math.floor(math.sqrt(2) * COST_SCALE + 0.5)
+    local function euclid_cost(ax, ay, az, bx, by, bz)
+        local dx = bx - ax
+        local dy = by - ay
+        local dz = bz - az
+        if dx ~= 0 and dy ~= 0 and dz ~= 0 then
+            return 1732 -- 3D diagonal (sqrt3) scaled
+        elseif dx ~= 0 and dy ~= 0 then
+            return sqrt2
+        elseif dx ~= 0 and dz ~= 0 then
+            return sqrt2
+        elseif dy ~= 0 and dz ~= 0 then
+            return sqrt2
+        else
+            return COST_SCALE -- single-axis step
+        end
+    end
+
+    local function not_opaque(x, y, z)
+        return bit.band(flags[((z * H) + y) * W + x], OpaqueBit) == 0
+    end
+
+    for light_entity in pairs(world.lights) do
+        if light_entity.alive ~= false then
+            local sx = math.floor(light_entity.x)
+            local sy = math.floor(light_entity.y)
+            local sz = math.floor(light_entity.z)
+            if sx >= 0 and sx < W and sy >= 0 and sy < H and sz >= 0 and sz < D then
+                local radius = light_entity.light_radius
+                local peak = light_entity.light_intensity
+                local budget = radius * COST_SCALE
+                --- Cone params (precomputed once per light; nil for spheres).
+                --- A cell receives light only if its offset from the source
+                --- lies within the cone's solid angle: normalize(offset)·dir
+                --- >= cos(half_angle). We precompute cos(half_angle) and a
+                --- normalized dir and a squared-vs-dotted-threshold form that
+                --- avoids per-cell sqrt: the test `dot(o,dir) >= cos(ang) * |o|`
+                --- squares to `dot^2 >= cos2*|o|^2` (only when cos>=0, i.e.
+                --- half_angle <= 90°, which is always true for real cones).
+                local cone = nil
+                if light_entity.light_shape == "cone" then
+                    local d = light_entity.light_dir
+                    local dl = d[1] * d[1] + d[2] * d[2] + d[3] * d[3]
+                    if dl > 0 then
+                        local inv = 1.0 / math.sqrt(dl)
+                        local cos_a = math.cos(light_entity.light_half_angle)
+                        cone = {
+                            dx = d[1] * inv,
+                            dy = d[2] * inv,
+                            dz = d[3] * inv,
+                            cos2 = cos_a * cos_a, -- squared threshold
+                            -- The actual test: `dot(o,dir) >= cos(ang) * |o|`.
+                            -- Since half_angle <= pi/2 ⇒ cos(ang) >= 0, both
+                            -- sides are nonneg when |o|>=0, so squaring is safe:
+                            -- dot^2 >= cos2 * (ox²+oy²+oz²). The source cell
+                            -- (offset 0) is always lit (torch lights itself).
+                        }
+                    end
+                end
+                local field = pf.distance_field({
+                    dims = { W, H, D },
+                    source = { sx, sy, sz },
+                    passable = not_opaque,
+                    cost = euclid_cost,
+                    transition = light_transition,
+                    diagonal = true,
+                    budget = budget,
+                    -- Box-scoped: confine the arena memset + the reached-cell
+                    -- log to a box around the source. The flood can't reach
+                    -- past `budget` (= radius), so a box of source ± (radius+2)
+                    -- covers every air cell it opens AND the one-step-into-wall
+                    -- cells of the wall pass below. On the 2000×2000×10 map
+                    -- this turns a per-light 40 MB memset + 40 M-cell scan into
+                    -- a tiny box memset + a few-thousand-cell iteration.
+                    box = {
+                        math.max(0, sx - radius - 2),
+                        math.max(0, sy - radius - 2),
+                        math.max(0, sz - radius - 2),
+                        math.min(W - 1, sx + radius + 2),
+                        math.min(H - 1, sy + radius + 2),
+                        math.min(D - 1, sz + radius + 2),
+                    },
+                })
+                local gscore = field.gscore
+                local visited = field.visited
+                if visited == nil then
+                    goto continue -- box disabled / search failure: skip this light
+                end
+                local inv_r = 1.0 / budget -- inverse scaled budget (so 1 = at source)
+                -- The source cell is gscore 0. Walk every cell the flood REACHED
+                -- (the `visited` list of global indices, not a 0..count-1 scan):
+                -- gscore is valid for exactly these (unseen cells carry stale
+                -- gscore from the pooled scratch buffer, so we MUST not read them).
+                --
+                -- Falloff: a GENTLE curve (1 - (g/radius)²) so the lit pool
+                -- holds near-full brightness through most of the radius and
+                -- only softens at the edge — feels like a bright torch with a
+                -- soft penumbra, rather than a linear ramp that dims immediately.
+                for _, i in ipairs(visited) do
+                    local g = gscore[i]
+                    if g <= budget then
+                        local frac = g * inv_r -- 0 at source, 1 at radius
+                        local t = 1.0 - frac * frac -- bright core, soft edge
+                        if t > 0 then
+                            --- Cone angular filter (sphere lights skip this). The
+                            --- source cell (offset 0) is always in-cone and lit.
+                            local in_cone = true
+                            if cone ~= nil then
+                                local cz = math.floor(i / (W * H))
+                                local rem2 = i - cz * W * H
+                                local cy = math.floor(rem2 / W)
+                                local cx = rem2 - cy * W
+                                local ox = cx - sx
+                                local oy = cy - sy
+                                local oz = cz - sz
+                                if ox ~= 0 or oy ~= 0 or oz ~= 0 then
+                                    local dot = ox * cone.dx + oy * cone.dy + oz * cone.dz
+                                    local len2 = ox * ox + oy * oy + oz * oz
+                                    if dot * dot < cone.cos2 * len2 then
+                                        in_cone = false
+                                    elseif dot < 0 then
+                                        -- Behind the source (cone points away):
+                                        -- dot may be positive but the squared
+                                        -- test passes only for forward hemisphere
+                                        -- when cos(ang) >= 0; guard dot < 0 out.
+                                        in_cone = false
+                                    end
+                                end
+                            end
+                            if in_cone then
+                                local add = math.floor(peak * t)
+                                if add > 0 then
+                                    local cur = light[i]
+                                    local nv = cur + add
+                                    if nv > 255 then
+                                        nv = 255
+                                    end
+                                    light[i] = nv
+                                end
+                            end
+                        end
+                    end
+                end
+
+                --- WALL-SURFACE PASS (this light): opaque cells (walls,
+                --- pillars, ceilings) the player can SEE render black otherwise,
+                --- because the air flood above never enters them (they're
+                --- light-opaque for PROPAGATION — light doesn't pass through).
+                --- But a wall BLOCKS light and is itself illuminated up to its
+                --- far edge: light enters the wall face from the lit air touching
+                --- it, penetrates the wall's thickness (diminishing), and does
+                --- NOT bleed out the far side into air (so walls still cast
+                --- shadows). Implemented as a small BFS over opaque cells seeded
+                --- by reached air cells (distance d_air + one step), propagating
+                --- wall→wall only, bounded by the same radius budget. 1-cell
+                --- walls/pillars light fully (their air-facing surface IS the
+                --- whole cell); thicker walls dim through to the far edge.
+                ---
+                --- Per-light so the falloff is continuous (the wall's distance
+                --- continues the air path distance). The wall uses the SAME
+                --- quadratic falloff as air; a wall cell at distance d gets
+                --- intensity peak*(1-(d/budget)^2), added into light[] (clamp).
+                local WALL_STEP = COST_SCALE -- one cell into the wall / wall→wall
+                local frontier = {} -- current wave's wall cell indices
+                -- Seed: every opaque cell adjacent to a reached AIR cell. Its
+                -- distance = (the air cell's path distance) + one step into
+                -- the wall face. We iterate the air flood's `visited` cells
+                -- (not 0..count-1) and look at their opaque neighbors. Air
+                -- neighbors were already handled by the flood; we only ENTER
+                -- walls here, so no light bleeds out the far side (walls still
+                -- cast shadows).
+                for _, ai in ipairs(visited) do
+                    local ag = gscore[ai]
+                    if ag <= budget and ag + WALL_STEP <= budget then
+                        local az = math.floor(ai / (W * H))
+                        local arem = ai - az * W * H
+                        local ay = math.floor(arem / W)
+                        local ax = arem - ay * W
+                        for k = 1, #WALL_OFFSETS, 3 do
+                            local nx = ax + WALL_OFFSETS[k]
+                            local ny = ay + WALL_OFFSETS[k + 1]
+                            local nz = az + WALL_OFFSETS[k + 2]
+                            if nx >= 0 and nx < W and ny >= 0 and ny < H and nz >= 0 and nz < D then
+                                local ni = ((nz * H) + ny) * W + nx
+                                if bit.band(flags[ni], OpaqueBit) ~= 0 then
+                                    local nd = ag + WALL_STEP
+                                    if wdist[ni] == nil or nd < wdist[ni] then
+                                        wdist[ni] = nd
+                                        frontier[#frontier + 1] = ni
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+
+                -- Propagate wall→wall (diminishing) until the budget runs out
+                -- or no more wall cells reach. Each wave builds a fresh next
+                -- frontier (the wall set near a light is tiny — thin walls —
+                -- so per-wave allocation is negligible). A wall cell reached
+                -- by a shorter path is re-enqueued; reprocessing is idempotent
+                -- (same light value recomputed) and the budget bounds it.
+                while #frontier > 0 do
+                    local next_frontier = {}
+                    for idx = 1, #frontier do
+                        local ci = frontier[idx]
+                        local cd = wdist[ci]
+                        if cd <= budget then
+                            -- accumulate this wall cell's light contribution
+                            local frac = cd * inv_r
+                            local tw = 1.0 - frac * frac
+                            if tw > 0 then
+                                local add = math.floor(peak * tw)
+                                if add > 0 then
+                                    local c = light[ci]
+                                    local nv = c + add
+                                    if nv > 255 then
+                                        nv = 255
+                                    end
+                                    light[ci] = nv
+                                end
+                            end
+                            -- expand to wall neighbors (wall→wall only — no
+                            -- bleed into far-side air, so walls cast shadows)
+                            if cd + WALL_STEP <= budget then
+                                local cz = math.floor(ci / (W * H))
+                                local crem = ci - cz * W * H
+                                local cy = math.floor(crem / W)
+                                local cx = crem - cy * W
+                                for k = 1, #WALL_OFFSETS, 3 do
+                                    local nx = cx + WALL_OFFSETS[k]
+                                    local ny = cy + WALL_OFFSETS[k + 1]
+                                    local nz = cz + WALL_OFFSETS[k + 2]
+                                    if
+                                        nx >= 0
+                                        and nx < W
+                                        and ny >= 0
+                                        and ny < H
+                                        and nz >= 0
+                                        and nz < D
+                                    then
+                                        local ni = ((nz * H) + ny) * W + nx
+                                        if bit.band(flags[ni], OpaqueBit) ~= 0 then
+                                            local nd = cd + WALL_STEP
+                                            if wdist[ni] == nil or nd < wdist[ni] then
+                                                wdist[ni] = nd
+                                                next_frontier[#next_frontier + 1] = ni
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    frontier = next_frontier
+                end
+                -- reset the per-light wdist scratch for the next light.
+                for k in pairs(wdist) do
+                    wdist[k] = nil
+                end
+            end
+        end
+        ::continue::
     end
 end
 
@@ -596,20 +1114,20 @@ local function resolve_glyph(types, W, H, D, wx, wy, z, tv, s)
     return connect.default
 end
 
---- Render the map to `con`, centered on the camera. DEFAULT-DARK:
---- cells with NEITHER `TileFlags.Visible` (currently in the player's FOV)
---- NOR `TileFlags.Explored` (memory — ever seen) render nothing (the
---- world opens black and is revealed as the player moves). `world.update_fov`
---- recomputes the Visible set each frame from the camera (player) cell;
---- Explored is the sticky union of every Visible set, so memory accumulates.
+--- Render the map to `con`, centered on the camera. DEFAULT-DARK: cells
+--- that are NOT `TileFlags.Visible` this frame render nothing (the world
+--- opens black and is revealed as the player moves — no memory). `world.update_fov`
+--- recomputes the per-frame Visible set each frame from the camera (player) cell;
+--- FOV is the hard render boundary.
 ---
 --- Per cell, one z loop 0..ceil_top (ceil_top = cam.z + z_offset):
----   • Visible  → full shaded appearance (depth-below / height-above falloff,
----     the same shade cache as before).
----   • Explored (not Visible) → the same shaded appearance DIMMED by
----     MEMORY_BRIGHTNESS (0.35), applied ON TOP of the depth/height shade,
----     so remembered terrain keeps its per-layer falloff but reads dim.
----   • neither flag → no `put` at all (the cell stays at con:clear's bg).
+---   • Visible at/below cam.z → the shaded appearance (depth-below/height-
+---     above falloff from the shade cache). In a DARK world (`is_dark`), this
+---     is lerped between BLACK and the shaded color by the cell's light value
+---     (L/255): unlit visible cells render near-black, lit cells full shade.
+---     In daylight the shade IS the ambient sun, applied directly.
+---   • Visible above cam.z → the same, composed with the x-ray hole ring.
+---   • NOT Visible → no `put` at all (the cell stays at con:clear's bg).
 ---
 --- The X-ray concentric-ring ceiling pass is GONE: native-3D FOV reveals
 --- open-ceiling voxels directly (rays climb through Open air above the
@@ -652,9 +1170,10 @@ function world.render_map(con, view_rows)
     local above = world._shade_above -- [height_above] = per-type appearance
     local types = map.types.cdata
     local flags = map.flags.cdata
+    local light_arr = map.light -- per-cell 0-255 light value (dark mode driver)
+    local is_dark = map.is_dark -- "does the sun exist?" — false = today's path
     local TF = tile.TileFlags
     local VisibleBit = TF.Visible
-    local ExploredBit = TF.Explored
     local Open = tile.TileType.Open
     local camz = cam.z
     local cpx, cpy = cam.x, cam.y
@@ -665,11 +1184,24 @@ function world.render_map(con, view_rows)
     --- actual cell beneath it rather than a fixed color.
     local function below_color(wx, wy)
         for bz = camz, 0, -1 do
-            local tv = types[((bz * H) + wy) * W + wx]
+            local i_b = ((bz * H) + wy) * W + wx
+            local tv = types[i_b]
             if tv ~= Open then
                 local s = shade[camz - bz][tv]
                 if s ~= nil then
-                    return s.fg, s.bg
+                    local bfg, bbg = s.fg, s.bg
+                    -- Dark mode: the below cell is ALSO visible (lit by the
+                    -- light array), so its color must be dark-lerped by its
+                    -- own light value before the x-ray ring composes with it.
+                    if is_dark then
+                        local L = light_arr[i_b]
+                        if L < 255 then
+                            local t = L / 255.0
+                            bfg = lerp_color(BLACK, bfg, t)
+                            bbg = lerp_color(BLACK, bbg, t)
+                        end
+                    end
+                    return bfg, bbg
                 end
             end
         end
@@ -699,21 +1231,30 @@ function world.render_map(con, view_rows)
                             local i = ((z * H) + wy) * W + wx
                             local fl = flags[i]
                             local is_visible = bit.band(fl, VisibleBit) ~= 0
-                            local is_explored = bit.band(fl, ExploredBit) ~= 0
-                            if is_visible or is_explored then
+                            if is_visible then
                                 local tv = types[i]
                                 local s = entry[tv]
                                 if s ~= nil then
                                     local ch = resolve_glyph(types, W, H, D, wx, wy, z, tv, s)
                                     local fg, bg = s.fg, s.bg
-                                    if not is_visible then
-                                        -- Memory: dim the same shade by
-                                        -- MEMORY_BRIGHTNESS (keeps the
-                                        -- depth/height falloff; reads dim).
-                                        fg = shade_color(fg, MEMORY_BRIGHTNESS)
-                                        bg = shade_color(bg, MEMORY_BRIGHTNESS)
-                                        con:put_rgb(cx, cy, ch, fg, bg)
-                                    elseif z > camz then
+                                    -- DARK MODE: when is_dark, the `light` array
+                                    -- drives brightness instead of sunlight —
+                                    -- lerp THIS visible cell's shaded appearance
+                                    -- between BLACK (unlit, L=0) and its full
+                                    -- sunlit shade (L=255), BEFORE the x-ray/full
+                                    -- branches use it (so the x-ray composes two
+                                    -- already-lit colors). FOV is the hard render
+                                    -- boundary: no memory, so only the per-frame
+                                    -- Visible set ever reaches here.
+                                    if is_dark then
+                                        local L = light_arr[i]
+                                        if L < 255 then
+                                            local t = L / 255.0
+                                            fg = lerp_color(BLACK, fg, t)
+                                            bg = lerp_color(BLACK, bg, t)
+                                        end
+                                    end
+                                    if z > camz then
                                         -- VISIBLE above-layer cell: carve
                                         -- the x-ray hole. CORE = skip (the
                                         -- hole); rings = lerp ceiling→below
@@ -768,9 +1309,7 @@ end
 
 --- Draw every living entity that exposes a `draw(console, cam)` method,
 --- ONLY on cells currently in the player's FOV (`TileFlags.Visible`).
---- MEMORY SHOWS NO ENTITIES: explored-but-not-visible cells render their
---- terrain dimmed (render_map) but their entities are skipped — you
---- remember the shape of a room, not the goblin that was in it. Entities
+--- There is no memory, so off-screen entities are simply skipped — entities
 --- are drawn on the camera's z layer and above, up to the peek height
 --- (`z_offset`), the same z-window render_map paints. Scans the pooled
 --- slots [1..capacity], skipping dead ones via the `world.alive` tombstone.

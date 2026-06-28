@@ -71,7 +71,7 @@
       "unbalanced": "Any",
       "unused": "Any"
     },
-    "globals": ["class", "mixin", "enum"]
+    "globals": ["class", "mixin", "enum", "bit"]
   },
   "workspace": {
     "library": [],

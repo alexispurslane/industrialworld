@@ -37,7 +37,7 @@ local TileType = enum({
 })
 
 --- Per-tile bitflags. 0 = no flags (the default).
-local TileFlags = enum.flags("Walkable", "Opaque", "Explored", "Visible")
+local TileFlags = enum.flags("Walkable", "Opaque", "Visible")
 
 --- Per-tile-type definition. ONE lookup table: each entry is a composed
 --- mixin instance (`mixin({}, Renderable, Collidable)`) carrying that

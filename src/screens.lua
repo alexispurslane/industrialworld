@@ -95,11 +95,20 @@ function screens.GameScreen(con)
         end,
 
         draw = function()
+            -- Clear to BLACK so cells outside the FOV (which render nothing,
+            -- no `put`) match in-FOV unlit cells exactly: both pure black.
+            -- The default bg may have been left as `soot` (gray) by the menu
+            -- screen, which would make out-of-FOV read gray vs the in-FOV
+            -- unlit cells' black — an odd clash. The map region below the
+            -- message panel is what we want black; the message panel paints
+            -- its own bg over the bottom rows.
+            con:set_default_bg(palette.black)
             con:clear()
             -- Recompute each frame so a window resize takes effect
             -- immediately (the console shim's size is updated on resize).
             local view_rows = con:height() - messages.PANEL_H
             world.cam.view_rows = view_rows
+            world.cam.view_cols = con:width()
             -- Camera follows the player every frame (motion is continuous
             -- via the integrator; there's no discrete "moved" event
             -- anymore). Sync cam x/y/z from world.player BEFORE fov/render
@@ -119,6 +128,12 @@ function screens.GameScreen(con)
             -- this frame. Cheapest placement: once per draw, right before
             -- render_map / draw_entities read the flags.
             world.update_fov()
+            -- Recompute the per-frame light array (dark mode only; in
+            -- daylight this early-outs after filling 255). Must run AFTER
+            -- update_fov only insofar as it reads map flags for opacity —
+            -- it is independent of Visible, so order vs FOV doesn't matter,
+            -- but it must run BEFORE render_map reads the light array.
+            world.update_lights()
             world.render_map(con, view_rows)
             world.draw_entities(con)
             messages.draw(con)

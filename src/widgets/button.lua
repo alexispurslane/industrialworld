@@ -7,6 +7,7 @@ local Clickable = require("mixins.ui.clickable")
 local Label = require("mixins.ui.label")
 local palette = require("palette")
 
+---@class Button
 local Button, super = class("Button", Widget):mixin(ScreenRect, Hoverable, Clickable, Label)
 
 function Button:init(con, x, y, text, callback, fg, fg_hover)

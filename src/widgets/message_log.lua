@@ -25,6 +25,7 @@ local function lerp_color(c, target, t)
     }
 end
 
+---@class MessageLog : TextPanel
 local MessageLog, super = class("MessageLog", TextPanelWidget):mixin(Anchor)
 
 function MessageLog:init(con, visible_rows, event_name, max_lines)

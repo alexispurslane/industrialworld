@@ -489,7 +489,7 @@ function PhysicsObject:update(dt)
     --    (airborne over OOB, off-map). Raised to the dt exponent for
     --    frame-rate independence. Vertical is gravity/landing-managed.
     if dt > 0 then
-        local f = math.pow(self:surface_friction(), dt)
+        local f = self:surface_friction() ^ dt
         self.vx = self.vx * f
         self.vy = self.vy * f
     end

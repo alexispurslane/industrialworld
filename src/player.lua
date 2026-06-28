@@ -26,6 +26,7 @@ local Entity = require("entity")
 local PhysicsObject = require("mixins.physics_object")
 local Collision = require("collision")
 local Drawable = require("mixins.drawable")
+local LightSource = require("mixins.light_source")
 local Renderable = require("mixins.renderable")
 local palette = require("palette")
 local world = require("world")
@@ -33,7 +34,7 @@ local bus = require("event")
 local log = require("log")
 local L = log.get("player")
 
-local Player, super = class("Player", Entity):mixin(PhysicsObject, Drawable)
+local Player, super = class("Player", Entity):mixin(PhysicsObject, Drawable, LightSource)
 
 --- Initialize the player at (x, y) on z layer `z`. Glyph is "@".
 --- Solid mask: collides with solid terrain (walls) so it can't walk through.
@@ -58,6 +59,14 @@ function Player:init(x, y, z)
     -- Drawable.init sets Position (idempotent reset to the same x,y,z) +
     -- appearance (the "@" glyph).
     Drawable.init(self, { x = x, y = y, z = z, fg = palette.text, glyphs = "@" })
+
+    -- Carried torch: a sphere light whose origin is the player's own Position
+    -- (cell), so it TRACKS the player every frame — `world.update_lights` reads
+    -- `self.x/y/z` live, no follow behavior needed. Moderate radius so the lit
+    -- pool is visible around the player in a dark map, falling off to dark at
+    -- the radius edge. (Only matters when the map is_dark; in daylight this is
+    -- a no-op the player never sees.)
+    LightSource.init(self, { radius = 9, shape = "sphere", intensity = 255 })
 
     -- Subscribe in init (per the event-bus convention). `bus.subscribe`
     -- tracks the unsubscribe fns on self._unsubs for teardown on destroy.

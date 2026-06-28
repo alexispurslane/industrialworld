@@ -49,4 +49,39 @@ function scratch.get(count)
     return s
 end
 
+--- Like `get`, but zero ONLY the cells inside a 3D sub-box of the state
+--- array instead of the full `count`-cell arena. For budget-bounded searches
+--- that stay within a box around the source (e.g. light floods of radius R
+--- on a 2000×2000×10 map), this turns a full-map memset (here ~40 MB) into a
+--- tiny box-sized one (a few thousand cells). The pooled arrays may carry
+--- stale `CLOSED` state OUTSIDE the box from prior searches, but a
+--- budget-bounded search never reads a cell outside its box (every neighbor
+--- it opens is within radius R ⊂ box of the source), so a partial zero is
+--- safe — see `distance_field`'s `box` option, which pairs this with a
+--- `visited` list so the caller never scans the stale region either.
+---
+--- `box` is {minx, miny, minz, maxx, maxy, maxz} in global cell coords.
+---@param count integer  w*h*d of the FULL search space (arena size, for pooling).
+---@param w integer  grid width.
+---@param h integer  grid height.
+---@param box table  {minx, miny, minz, maxx, maxy, maxz}.
+---@return table s
+function scratch.get_box(count, w, h, box)
+    local s = pool[count]
+    if s == nil then
+        s = make(count)
+        pool[count] = s
+    end
+    local minx, miny, minz = box[1], box[2], box[3]
+    local maxx, maxy, maxz = box[4], box[5], box[6]
+    local bw = maxx - minx + 1
+    for z = minz, maxz do
+        local zbase = (z * h) * w
+        for y = miny, maxy do
+            ffi.fill(s.state + zbase + y * w + minx, bw, 0)
+        end
+    end
+    return s
+end
+
 return scratch

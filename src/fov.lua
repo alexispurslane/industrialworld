@@ -66,6 +66,7 @@
 -- a single `from` is one such table, a set is a list of them.
 
 local ffi = require("ffi")
+local bit = require("bit")
 
 local raycast3d = require("pathfinding.raycast3d")
 
@@ -86,23 +87,53 @@ local function normalize(opts)
     local w, h, d = dims[1], dims[2], dims[3]
     local opaque = opts.opaque
     assert(type(opaque) == "function", "fov: opts.opaque(x,y,z)->bool required")
-    local range = opts.range
-    assert(type(range) == "number" and range >= 0, "fov: opts.range (integer >= 0) required")
-    local shape = opts.shape or "sphere"
-    assert(shape == "sphere" or shape == "box", "fov: opts.shape = 'sphere'|'box'")
+    local entities_at = opts.entities_at -- optional; nil => no entity enumeration
+    -- Two candidate modes (mutually exclusive):
+    --   * box: an explicit axis-aligned voxel extent {minx,miny,minz,maxx,maxy,maxz}
+    --          (integers, inclusive). Candidate voxels = the box. This is the
+    --          "unlimited-range, viewport-bounded" vision mode: rays still stop
+    --          at opaque voxels, but there is NO spherical falloff — the viewer
+    --          sees everything in the box with line of sight, like real eyes.
+    --   * range + shape (default): the legacy radius-bounded sphere/box. Used by
+    --          NPC vision, light cones, anything with a finite vision radius.
+    local box = opts.box
+    local range, shape
+    if box ~= nil then
+        assert(
+            type(box) == "table" and #box == 6,
+            "fov: opts.box = {minx,miny,minz,maxx,maxy,maxz} required"
+        )
+        -- Clamp the box to the grid (callers may pass a viewport that extends
+        -- past the map edge; cheaper to clamp here than per-cell in the loops).
+        local minx = math.max(0, math.floor(box[1]))
+        local miny = math.max(0, math.floor(box[2]))
+        local minz = math.max(0, math.floor(box[3]))
+        local maxx = math.min(w - 1, math.floor(box[4]))
+        local maxy = math.min(h - 1, math.floor(box[5]))
+        local maxz = math.min(d - 1, math.floor(box[6]))
+        box = { minx, miny, minz, maxx, maxy, maxz }
+    else
+        range = opts.range
+        assert(type(range) == "number" and range >= 0, "fov: opts.range (integer >= 0) required")
+        shape = opts.shape or "sphere"
+        assert(shape == "sphere" or shape == "box", "fov: opts.shape = 'sphere'|'box'")
+    end
     return {
         w = w,
         h = h,
         d = d,
         count = w * h * d,
         opaque = opaque,
-        entities_at = opts.entities_at, -- optional; nil => no entity enumeration
-        range = math.floor(range),
+        entities_at = entities_at,
+        range = range and math.floor(range),
         shape = shape,
+        box = box, -- nil in range/shape mode
     }
 end
 
---- True if `(dx, dy, dz)` lies within the shape of radius `r`.
+--- True if the OFFSET `(dx, dy, dz)` from a viewer lies within the
+--- range/shape extent. Only meaningful in range/shape mode (box mode
+--- enumerates its own candidate set, so this is never called there).
 ---@param o table  Normalized options.
 ---@param dx integer
 ---@param dy integer
@@ -114,6 +145,18 @@ local function in_shape(o, dx, dy, dz)
         return math.abs(dx) <= r and math.abs(dy) <= r and math.abs(dz) <= r
     end
     return dx * dx + dy * dy + dz * dz <= r * r
+end
+
+--- True if the ABSOLUTE cell `(x, y, z)` lies within the box extent. Only
+--- meaningful in box mode (range/shape mode gates by offset via in_shape).
+---@param o table  Normalized options.
+---@param x integer
+---@param y integer
+---@param z integer
+---@return boolean
+local function in_box(o, x, y, z)
+    local b = o.box
+    return x >= b[1] and x <= b[4] and y >= b[2] and y <= b[5] and z >= b[3] and z <= b[6]
 end
 
 --- Mark voxel `(cx, cy, cz)` visible in `vis` and report whether it is
@@ -339,26 +382,48 @@ end
 ---@return any vis  uint8_t[count] cdata, 1 where a voxel is visible from any viewpoint.
 local function compute_field(o, positions)
     local w, h, d = o.w, o.h, o.d
-    local r = o.range
     local vis = ffi.new("uint8_t[?]", o.count)
+    local box = o.box
     for _, p in ipairs(positions) do
         local sx, sy, sz = p[1], p[2], p[3]
         if sx >= 0 and sx < w and sy >= 0 and sy < h and sz >= 0 and sz < d then
             vis[((sz * h) + sy) * w + sx] = 1 -- viewer sees its own voxel
-            for ddz = -r, r do
-                local tz = sz + ddz
-                if tz >= 0 and tz < d then
-                    for ddy = -r, r do
-                        local ty = sy + ddy
-                        if ty >= 0 and ty < h then
-                            for ddx = -r, r do
-                                if
-                                    (ddx ~= 0 or ddy ~= 0 or ddz ~= 0)
-                                    and in_shape(o, ddx, ddy, ddz)
-                                then
-                                    local tx = sx + ddx
-                                    if tx >= 0 and tx < w then
-                                        cast_ray3d(o, sx, sy, sz, tx, ty, tz, vis)
+            if box ~= nil then
+                -- Box mode: cast a ray to EVERY voxel in the explicit extent
+                -- (the viewport, for unlimited-range player vision). No
+                -- spherical falloff — the viewer sees everything in the box
+                -- with an unobstructed 3D ray, like real eyes seeing to the
+                -- horizon (blocked only by opaque voxels).
+                local minx, miny, minz, maxx, maxy, maxz =
+                    box[1], box[2], box[3], box[4], box[5], box[6]
+                for tz = minz, maxz do
+                    for ty = miny, maxy do
+                        for tx = minx, maxx do
+                            if not (tx == sx and ty == sy and tz == sz) then
+                                cast_ray3d(o, sx, sy, sz, tx, ty, tz, vis)
+                            end
+                        end
+                    end
+                end
+            else
+                -- Range/shape mode: cast a ray to every voxel in the viewer's
+                -- spherical/box extent (finite vision radius).
+                local r = o.range
+                for ddz = -r, r do
+                    local tz = sz + ddz
+                    if tz >= 0 and tz < d then
+                        for ddy = -r, r do
+                            local ty = sy + ddy
+                            if ty >= 0 and ty < h then
+                                for ddx = -r, r do
+                                    if
+                                        (ddx ~= 0 or ddy ~= 0 or ddz ~= 0)
+                                        and in_shape(o, ddx, ddy, ddz)
+                                    then
+                                        local tx = sx + ddx
+                                        if tx >= 0 and tx < w then
+                                            cast_ray3d(o, sx, sy, sz, tx, ty, tz, vis)
+                                        end
                                     end
                                 end
                             end
@@ -383,27 +448,47 @@ end
 ---@return table cells  List of {x,y,z} visible voxel tables.
 local function collect_cells(o, vis, positions)
     local w, h, d = o.w, o.h, o.d
-    local r = o.range
     local seen = {} -- [cell_idx] = true; dedup across overlapping bboxes
     local list, n = {}, 0
+    local box = o.box
     for _, p in ipairs(positions) do
-        local sx, sy, sz = p[1], p[2], p[3]
-        sz = math.max(0, math.min(d - 1, sz))
-        for ddz = -r, r do
-            local cz = sz + ddz
-            if cz >= 0 and cz < d then
-                for ddy = -r, r do
-                    local cy = sy + ddy
-                    if cy >= 0 and cy < h then
-                        for ddx = -r, r do
-                            if in_shape(o, ddx, ddy, ddz) then
-                                local cx = sx + ddx
-                                if cx >= 0 and cx < w then
-                                    local i = ((cz * h) + cy) * w + cx
-                                    if vis[i] == 1 and not seen[i] then
-                                        seen[i] = true
-                                        n = n + 1
-                                        list[n] = { cx, cy, cz }
+        if box ~= nil then
+            -- Box mode: scan the explicit extent (viewport-bounded vision).
+            local minx, miny, minz, maxx, maxy, maxz =
+                box[1], box[2], box[3], box[4], box[5], box[6]
+            for cz = minz, maxz do
+                for cy = miny, maxy do
+                    for cx = minx, maxx do
+                        local i = ((cz * h) + cy) * w + cx
+                        if vis[i] == 1 and not seen[i] then
+                            seen[i] = true
+                            n = n + 1
+                            list[n] = { cx, cy, cz }
+                        end
+                    end
+                end
+            end
+        else
+            -- Range/shape mode: scan the spherical/box extent around the viewer.
+            local r = o.range
+            local sx, sy, sz = p[1], p[2], p[3]
+            sz = math.max(0, math.min(d - 1, sz))
+            for ddz = -r, r do
+                local cz = sz + ddz
+                if cz >= 0 and cz < d then
+                    for ddy = -r, r do
+                        local cy = sy + ddy
+                        if cy >= 0 and cy < h then
+                            for ddx = -r, r do
+                                if in_shape(o, ddx, ddy, ddz) then
+                                    local cx = sx + ddx
+                                    if cx >= 0 and cx < w then
+                                        local i = ((cz * h) + cy) * w + cx
+                                        if vis[i] == 1 and not seen[i] then
+                                            seen[i] = true
+                                            n = n + 1
+                                            list[n] = { cx, cy, cz }
+                                        end
                                     end
                                 end
                             end
@@ -503,7 +588,14 @@ local function ray_to_target(o, from, target)
     if sx == ex and sy == ey and sz == ez then
         return true -- same cell: trivially visible
     end
-    if not in_shape(o, ex - sx, ey - sy, ez - sz) then
+    -- Range/shape gate (offset-based) OR box gate (absolute). In box mode the
+    -- target must lie within the explicit extent (viewport bounds); in
+    -- range/shape mode it must lie within the viewer's vision radius.
+    if o.box ~= nil then
+        if not in_box(o, ex, ey, ez) then
+            return false -- outside the explicit extent
+        end
+    elseif not in_shape(o, ex - sx, ey - sy, ez - sz) then
         return false -- beyond range / outside the shape extent
     end
     local opacity = o.opaque
@@ -533,7 +625,7 @@ end
 --- are seen; cells beyond an opaque wall or ceiling are excluded.
 ---
 --- @param from table  {x,y,z} viewer cell.
---- @param opts table  `{ dims, opaque, range, shape?, entities_at? }`.
+--- @param opts table  `{ dims, opaque, range, shape?, box?, entities_at? }`.
 --- @return table tiles  List of {x,y,z} cell tables.
 function fov.visible_tiles(from, opts)
     local o = normalize(opts)
@@ -546,7 +638,7 @@ end
 --- callback. Entities don't block sight (terrain `Opaque` does, by design).
 ---
 --- @param from table  {x,y,z} viewer cell.
---- @param opts table  `{ dims, opaque, range, shape?, entities_at }`.
+--- @param opts table  `{ dims, opaque, range, shape?, box?, entities_at }`.
 --- @return table entities  Flat list of entity tables.
 function fov.visible_entities(from, opts)
     local o = normalize(opts)
@@ -561,7 +653,7 @@ end
 --- are collected from it. Overlapping viewpoints naturally dedupe.
 ---
 --- @param positions table  List of {x,y,z} viewpoints.
---- @param opts table  `{ dims, opaque, range, shape?, entities_at }`.
+--- @param opts table  `{ dims, opaque, range, shape?, box?, entities_at }`.
 --- @return table result  `{ tiles = list of {x,y,z}, entities = list }`.
 function fov.visible_from_set(positions, opts)
     local o = normalize(opts)
@@ -582,7 +674,7 @@ end
 ---
 --- @param from table  {x,y,z} viewer cell.
 --- @param target table|integer  Entity reference OR Collision.* bitmask.
---- @param opts table  `{ dims, opaque, range, shape?, entities_at? }`.
+--- @param opts table  `{ dims, opaque, range, shape?, box?, entities_at? }`.
 --- @return boolean visible
 function fov.can_see(from, target, opts)
     local o = normalize(opts)
@@ -591,6 +683,7 @@ function fov.can_see(from, target, opts)
         local cells = collect_cells(o, vis, { from })
         return first_matching_entity(o, cells, target) ~= nil
     end
+    ---@cast target table
     return ray_to_target(o, from, target)
 end
 
@@ -602,7 +695,7 @@ end
 ---
 --- @param positions table  List of {x,y,z} viewpoints.
 --- @param target table|integer  Entity reference OR Collision.* bitmask.
---- @param opts table  `{ dims, opaque, range, shape?, entities_at? }`.
+--- @param opts table  `{ dims, opaque, range, shape?, box?, entities_at? }`.
 --- @return boolean visible
 function fov.can_see_from_set(positions, target, opts)
     local o = normalize(opts)
@@ -611,6 +704,7 @@ function fov.can_see_from_set(positions, target, opts)
         local cells = collect_cells(o, vis, positions)
         return first_matching_entity(o, cells, target) ~= nil
     end
+    ---@cast target table
     for _, p in ipairs(positions) do
         if ray_to_target(o, p, target) then
             return true
@@ -627,9 +721,7 @@ end
 --- range/shape gating + entity-position resolution), and `fov.visible_*`
 --- are the many-at-once forms. Implemented in `fov.line_of_sight`.
 ---
---- @param opts table  `{ dims, a = {x,y,z}, b = {x,y,z}, opaque }`.
---- @return boolean visible
---- @return table|nil blocker  First {x,y,z} cell on the ray that was opaque.
+---@type fun(opts: table): boolean, table|nil
 fov.line_of_sight = require("fov.line_of_sight").run
 
 return fov

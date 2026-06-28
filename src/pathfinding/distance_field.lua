@@ -24,15 +24,64 @@ local UNSEEN, OPEN, CLOSED = scratch.UNSEEN, scratch.OPEN, scratch.CLOSED
 ---
 --- @param opts table  `{ dims, source, passable, cost?, occupied?,
 ---                     transition?, diagonal?, budget? }`.
---- @return table field  `{ gscore = int32[count] cdata (0 for unreachable),
----                         status = "ok"|"budget_exhausted", source }`.
+--- @return table field  `{ gscore = int32[count] cdata (0 for unreachable,
+---                         guarded by `state` — see below),
+---                         state = uint8[count] cdata (0=unseen, 1=open, 2=closed),
+---                         status = "ok"|"budget_exhausted"|"node_cap_exhausted", source }`.
 function distance_field.run(opts)
     local o = grid.normalize(opts)
     local w, h, d, count = o.w, o.h, o.d, o.count
     local src = opts.source
     local sx, sy, sz = src[1], src[2], src[3]
 
-    local s = scratch.get(count)
+    -- Optional `box` = {minx,miny,minz,maxx,maxy,maxz} in GLOBAL cell coords:
+    -- a sub-region guaranteed to contain every cell the search can reach
+    -- (callers size it source ± (budget_radius + margin)). When set, we
+    -- borrow a box-scoped scratch (`get_box`) that zeroes ONLY the box
+    -- sub-range of `state` — a tiny memset instead of a full-map one on
+    -- huge maps — and we record every reached cell in a `visited` list so
+    -- callers iterate the reached set (a few thousand) instead of scanning
+    -- 0..count-1 (40 M+). The flood loop itself is UNCHANGED: it still uses
+    -- full-map `grid.cell` indices, and budget bounding guarantees it never
+    -- opens (or even reads meaningfully) a cell outside the box. Stale
+    -- state outside the box is therefore never consumed.
+    local box = opts.box
+    local s
+    if box ~= nil then
+        local minx, miny, minz = box[1], box[2], box[3]
+        local maxx, maxy, maxz = box[4], box[5], box[6]
+        if minx < 0 then
+            minx = 0
+        end
+        if miny < 0 then
+            miny = 0
+        end
+        if minz < 0 then
+            minz = 0
+        end
+        if maxx > w - 1 then
+            maxx = w - 1
+        end
+        if maxy > h - 1 then
+            maxy = h - 1
+        end
+        if maxz > d - 1 then
+            maxz = d - 1
+        end
+        local bw = maxx - minx + 1
+        local bh = maxy - miny + 1
+        local bd = maxz - minz + 1
+        s = scratch.get_box(count, w, h, {
+            minx,
+            miny,
+            minz,
+            maxx,
+            maxy,
+            maxz,
+        })
+    else
+        s = scratch.get(count)
+    end
     local gscore = s.gscore
     local parent = s.parent
     local state = s.state
@@ -42,6 +91,11 @@ function distance_field.run(opts)
     state[sc] = OPEN
     local open = heap.new()
     heap.push(open, 0, sc)
+
+    -- Reached-cell log (box mode only): global cell index of every cell the
+    -- flood opened, recorded once on first UNSEEN->OPEN (incl. the source).
+    -- Callers iterate this instead of 0..count-1 (see `box` doc above).
+    local visited = box ~= nil and { sc } or nil
 
     local out = {}
     local expanded = 0
@@ -59,14 +113,28 @@ function distance_field.run(opts)
         state[cur] = CLOSED
         expanded = expanded + 1
         if expanded > node_cap then
-            return { gscore = gscore, status = "node_cap_exhausted", source = sc, parent = parent }
+            return {
+                gscore = gscore,
+                state = state,
+                status = "node_cap_exhausted",
+                source = sc,
+                parent = parent,
+                visited = visited,
+            }
         end
         local cur_g = gscore[cur]
         -- COST budget: once the cheapest-open cell already costs more than
         -- `budget`, every remaining open cell is too (Dijkstra pops in
         -- g-score order), so the cost-bounded region is complete.
         if budget ~= nil and cur_g > budget then
-            return { gscore = gscore, status = "budget_exhausted", source = sc, parent = parent }
+            return {
+                gscore = gscore,
+                state = state,
+                status = "budget_exhausted",
+                source = sc,
+                parent = parent,
+                visited = visited,
+            }
         end
 
         local cz = math.floor(cur / (w * h))
@@ -93,6 +161,9 @@ function distance_field.run(opts)
                         heap.push(open, tentative, nc)
                         if state[nc] ~= OPEN then
                             state[nc] = OPEN
+                            if visited ~= nil then
+                                visited[#visited + 1] = nc
+                            end
                         end
                     end
                 end
@@ -101,7 +172,14 @@ function distance_field.run(opts)
         ::continue::
     end
 
-    return { gscore = gscore, status = "ok", source = sc, parent = parent }
+    return {
+        gscore = gscore,
+        state = state,
+        status = "ok",
+        source = sc,
+        parent = parent,
+        visited = visited,
+    }
 end
 
 return distance_field
