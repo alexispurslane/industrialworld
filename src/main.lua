@@ -34,6 +34,7 @@ local game_state = require("game_state")
 local messages = require("messages")
 local ui = require("ui")
 local screens = require("screens")
+local sound = require("sound")
 local L = log.get("main")
 
 -- Log floor: override via the IW_LOG env var ("trace"/"debug"/"info"/...).
@@ -83,6 +84,13 @@ local function main()
     local con = blt.Console.new(cols, rows)
 
     log.get("main"):info("industrialworld ready (%dx%d) log=%s", cols, rows, env_lvl or "info")
+
+    -- Initialize the OpenAL-backed spatial audio engine and register the
+    -- small set of generated sounds used by the demo. WAV assets can be
+    -- loaded later with sound.load(id, path).
+    sound.init()
+    sound.register_tone("beep", 880, 0.15, 0.3)
+    sound.register_noise("crackle", 0.06, 0.35)
 
     -- The message log panel reserves the bottom PANEL_H rows of the
     -- console. Compute the visible map region height once and stash it on
@@ -391,6 +399,13 @@ local function main()
                     world.peek(1)
                 elseif vk == key.tk_pagedown then
                     world.peek(-1)
+                elseif vk == key.tk_b then
+                    -- Manual audio sanity check: unmuffled beep at the player.
+                    sound.play("beep", world.player.x, world.player.y, world.player.z, 0.5)
+                    bus.emit(
+                        "sound",
+                        { id = "beep", x = world.player.x, y = world.player.y, z = world.player.z }
+                    )
                 end
             end
 
@@ -441,6 +456,7 @@ local function main()
                 bus.emit("move", dx, dy)
             end
             world.update(dt)
+            sound.update(dt)
         end
 
         -- UI widgets always tick (anchors, animations) regardless of state.
@@ -478,6 +494,7 @@ local function main()
         end
     end
 
+    sound.shutdown()
     con:shutdown()
     blt.close()
     return 0

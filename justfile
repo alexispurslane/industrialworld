@@ -198,13 +198,16 @@ _compile-binary mode="release":
         -I{{BUILD_DIR}} \
         -I{{SRC_DIR}} \
         -I{{BLT_INC}} \
+        -I{{VENDOR_DIR}}/miniaudio \
         {{SRC_DIR}}/main.c \
+        {{SRC_DIR}}/audio.c \
         -Wl,-force_load,{{LUAJIT_LIB}} \
         $force_load \
         -Wl,-export_dynamic \
         -lc++ -lobjc -liconv -lm -ldl -lpthread \
         -framework Cocoa -framework OpenGL -framework IOKit \
         -framework CoreFoundation -framework AppKit -framework Foundation \
+        -framework CoreAudio -framework AudioToolbox -framework AudioUnit \
         -o {{BINARY}}
 
 # ── Run ────────────────────────────────────────────────────────────

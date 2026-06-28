@@ -30,4 +30,6 @@ so the agent can pick up context across sessions.
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/industrialworld/src/world.lua (15 reads) — Now let me investigate the perf concern. The lighting changes (per-light air flo
+- /Users/alexispurslane/Development/industrialworld/src/world.lua (6 reads) — The user just wants the file fixed. Let me read the current state of the file ar
+- /Users/alexispurslane/Development/industrialworld/src/fov.lua (6 reads)
+- /Users/alexispurslane/Development/industrialworld/src/pathfinding/grid.lua (3 reads)

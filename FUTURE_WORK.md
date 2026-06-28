@@ -11,10 +11,9 @@ visibility system so the player (and eventually NPCs) only see what they
 can see.
 
 - DONE: 2D or 3D FOV from the camera/player position.
-- "Explored but not currently visible" rendering.
-- Optional dynamic light sources (torches, forges, windows).
-- Should feed into the existing render_map depth/ceiling pass, not fight
-  it.
+- CLOSED "Explored but not currently visible" rendering.
+- DONE Optional dynamic light sources (torches, forges, windows).
+- DONE Should feed into the existing render_map depth/ceiling pass, not fight it.
 
 ## 2. Save / Load / Serialization
 
@@ -64,17 +63,7 @@ Input and logging are hardcoded or env-var driven.
 - Window/fullscreen, volume, and accessibility settings.
 - Use a proper OS save directory instead of the repo root.
 
-## 7. Turn Scheduling / Action Economy
-
-The main loop is purely real-time `update(dt)`. A turn-based or hybrid
-system will need a scheduler.
-
-- Energy / action-point system for actors.
-- Real-time vs. turn-based mode switch (or a hybrid pause-on-input
-  model).
-- Animations that play during turns without breaking scheduling.
-
-## 8. Error Boundaries and Debugging Tools
+## 7. Error Boundaries and Debugging Tools
 
 A throwing handler currently aborts the real-time loop or bus dispatch.
 
@@ -86,3 +75,4 @@ A throwing handler currently aborts the real-time loop or bus dispatch.
 
 Resolving the items above keeps the engine "game-ready" regardless of
 which specific game you build on top of it.
+

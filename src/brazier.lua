@@ -18,9 +18,10 @@ local class = require("classes")
 local Entity = require("entity")
 local Drawable = require("mixins.drawable")
 local LightSource = require("mixins.light_source")
+local SoundEmitter = require("mixins.sound_emitter")
 local palette = require("palette")
 
-local Brazier, super = class("Brazier", Entity):mixin(Drawable, LightSource)
+local Brazier, super = class("Brazier", Entity):mixin(Drawable, LightSource, SoundEmitter)
 
 --- Spawn a lit brazier at (x, y, z). Draws a "≈" in ember orange; emits a
 --- sphere light of `radius` (default 7) at peak intensity (default 255).
@@ -36,6 +37,22 @@ function Brazier:init(x, y, z, radius, intensity)
     -- registers the light with the world (teardown-tracked via _unsubs).
     Drawable.init(self, { x = x, y = y, z = z, fg = palette.safety_yellow, glyphs = "≈" })
     LightSource.init(self, { radius = radius or 7, shape = "sphere", intensity = intensity or 255 })
+    -- Fire crackle: soft, intermittent, spatialized relative to the player.
+    SoundEmitter.init(self, {
+        sound_id = "crackle",
+        volume = 0.7,
+        emit_interval = { min = 0.4, max = 1.2 },
+    })
+    -- One immediate crackle so new players can verify audio without
+    -- waiting for the first timer roll.
+    self:emit_sound()
+    -- Fire the first periodic crackle very soon after entering Playing.
+    self.sound_emit_timer = 0.2
+end
+
+function Brazier:update(dt)
+    super.update(self, dt)
+    SoundEmitter.step(self, dt)
 end
 
 return Brazier
